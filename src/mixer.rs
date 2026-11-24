@@ -35,7 +35,7 @@ fn eq_meter(x: i32, y: i32, bottom: i32, bus: &crate::bus::Bus, playing: bool) {
         draw::draw_rect_fill(x + 12, top + 20, 92, 2, CONTROL);
         draw::draw_rect_fill(x + 10 + i32::from(v) * 92 / 24, top + 17, 5, 8, ACCENT);
     }
-    let top = y + 190;
+    let top = y + 265;
     let db = if playing {
         20. * bus.rms().max(0.001).log10()
     } else {
@@ -98,8 +98,24 @@ pub(super) fn paint(f: &Frame, m: &Model) {
             &t.bus,
             m.playback.as_ref().is_some_and(|p| p.is_software()),
         );
-        label(x, y + 163, w, 24, &format!("Volume {volume}"), TEXT);
-        let top = y + 190;
+        for (row, (name, amount)) in ["Reverb", "Chorus", "Delay"]
+            .into_iter()
+            .zip(t.bus.effects())
+            .enumerate()
+        {
+            let top = y + 161 + row as i32 * 25;
+            label(x, top, w, 17, &format!("{name} {amount}%"), SUBTLE);
+            draw::draw_rect_fill(x + 12, top + 19, 92, 2, CONTROL);
+            draw::draw_rect_fill(
+                x + 10 + i32::from(amount) * 92 / 100,
+                top + 16,
+                5,
+                8,
+                ACCENT,
+            );
+        }
+        label(x, y + 239, w, 24, &format!("Volume {volume}"), TEXT);
+        let top = y + 265;
         let knob = bottom - volume * (bottom - top) / 127;
         draw::draw_rect_fill(x + 55, top, 6, bottom - top + 1, CONTROL);
         draw::draw_rect_fill(x + 55, knob, 6, bottom - knob + 1, ACCENT);
@@ -135,8 +151,8 @@ pub(super) fn paint(f: &Frame, m: &Model) {
         m.playback.as_ref().is_some_and(|p| p.is_software()),
     );
     let gain = i32::from(m.effects.1.get()[2]);
-    label(x, y + 163, STRIP - 4, 24, &format!("Gain {gain}%"), TEXT);
-    let top = y + 190;
+    label(x, y + 239, STRIP - 4, 24, &format!("Gain {gain}%"), TEXT);
+    let top = y + 265;
     let knob = bottom - gain * (bottom - top) / 127;
     draw::draw_rect_fill(x + 55, top, 6, bottom - top, CONTROL);
     draw::draw_rect_fill(x + 39, knob - 4, 38, 9, ACCENT);
@@ -186,9 +202,11 @@ pub(super) fn handle(
                 8
             } else if (133..161).contains(&y) {
                 9
+            } else if !master && (161..236).contains(&y) {
+                10 + ((y - 161) / 25) as usize
             } else if !master && (73..103).contains(&y) {
                 6
-            } else if (183..=bottom + 6).contains(&y) {
+            } else if (258..=bottom + 6).contains(&y) {
                 5
             } else {
                 if !master {
@@ -209,6 +227,14 @@ pub(super) fn handle(
     }
     if let Some((i, col, origin)) = *drag {
         let local = x - origin;
+        if col >= 10 {
+            tx.send(Action::TrackEffect(
+                i,
+                col - 10,
+                (100 * (local - 12).clamp(0, 92) / 92) as u8,
+            ));
+            return true;
+        }
         if col == 8 || col == 9 {
             tx.send(Action::BusValue(
                 i,
@@ -218,7 +244,7 @@ pub(super) fn handle(
             return true;
         }
         let value = if col == 5 {
-            127 * (bottom - y).clamp(0, bottom - 190) / (bottom - 190)
+            127 * (bottom - y).clamp(0, bottom - 265) / (bottom - 265)
         } else {
             127 * (local - 12).clamp(0, 92) / 92
         };

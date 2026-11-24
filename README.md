@@ -70,3 +70,9 @@ In **Track mixer**, drag the Bass or Treble line left or right to cut or boost u
 The **Mixer** menu offers track starting points (Flat, Vocal presence, Bass weight, Acoustic sparkle) and master EQ/gain starting points (Flat unity, Warm tape EQ, Gentle smile EQ, Bright clarity). Select a track before applying a track preset. Tone and master settings apply during the session and are captured by GUI WAV export; Standard MIDI files retain their usual MIDI controls.
 
 Track and mixer views show the instrument associated with each track’s initial MIDI patch. Patch numbers use the stored MIDI range (0–127), one lower than printed GM tables (1–128). Channel 10 displays Drum Kit. Nonzero banks display Bank Preset because their instrument names depend on the selected device or SoundFont.
+
+## Virtual piano and track effects
+
+With an SF2 loaded, open **Playback → Virtual piano** or press **Ctrl+K**. The window auditions the channel, bank, and patch of the track selected when you open it. Click a piano key or hold its printed computer key. The Z–M and Q–I rows provide two octaves with the intervening keys for sharps. The left and right arrows move the keyboard by an octave.
+
+In **Track Mixer**, drag the Reverb, Chorus, or Delay slider on an individual track. These effects process that track’s SoundFont audio before the master effects and are included in GUI WAV exports. The amounts are session settings.

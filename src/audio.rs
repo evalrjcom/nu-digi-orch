@@ -99,6 +99,7 @@ pub struct PlaybackEdit {
 }
 
 pub struct Playback {
+    pub notes: Option<std::sync::mpsc::Sender<Packet>>,
     pub edits: std::sync::mpsc::Sender<PlaybackEdit>,
     pub progress: Arc<Progress>,
     pub errors: std::sync::mpsc::Receiver<String>,
@@ -120,6 +121,7 @@ impl Drop for Playback {
 struct Stem {
     synth: Synthesizer,
     filter: crate::bus::Filter,
+    rack: crate::effects::Rack,
     track: usize,
 }
 struct Renderer {
@@ -166,13 +168,19 @@ impl Renderer {
                 stems.push(Stem {
                     synth: Synthesizer::new(font, &settings)?,
                     filter: crate::bus::Filter::new(rate),
+                    rack: crate::effects::Rack::new(rate),
                     track,
                 });
             }
         }
         // A sub-sample loop still needs one frame to make progress in the callback.
         let release_frame = frames(timeline.duration, rate).max(1);
-        let end_frame = render_end(release_frame, rate, looping, levels.get() != [0; 3]);
+        let end_frame = render_end(
+            release_frame,
+            rate,
+            looping,
+            levels.get() != [0; 3] || timeline.buses.iter().any(|bus| bus.effects() != [0; 3]),
+        );
         Ok(Self {
             rack: crate::effects::Rack::new(rate),
             levels,
@@ -215,7 +223,12 @@ impl Renderer {
                 self.release_frame,
                 self.rate,
                 self.looping,
-                self.levels.get() != [0; 3],
+                self.levels.get() != [0; 3]
+                    || self
+                        .timeline
+                        .buses
+                        .iter()
+                        .any(|bus| bus.effects() != [0; 3]),
             );
         }
         while !left.is_empty() {
@@ -273,8 +286,12 @@ impl Renderer {
                     let mut b = [0.; 256];
                     let n = l.len();
                     stem.synth.render(&mut a[..n], &mut b[..n]);
-                    stem.filter
-                        .process(&mut a[..n], &mut b[..n], &self.timeline.buses[stem.track]);
+                    let bus = &self.timeline.buses[stem.track];
+                    let effects = bus.effects();
+                    if effects != [0; 3] {
+                        stem.rack.process(&mut a[..n], &mut b[..n], effects);
+                    }
+                    stem.filter.process(&mut a[..n], &mut b[..n], bus);
                     for i in 0..n {
                         l[i] += a[i];
                         r[i] += b[i];
@@ -318,6 +335,7 @@ impl Playback {
         let channels = usize::from(config.channels());
         let (error_tx, errors) = std::sync::mpsc::channel();
         let (edits, updates) = std::sync::mpsc::channel::<PlaybackEdit>();
+        let (notes, note_rx) = std::sync::mpsc::channel();
         let stream_config = config.config();
         macro_rules! make_stream {
             ($sample:ty) => {{
@@ -329,6 +347,9 @@ impl Playback {
                             // Keep the synth, effect history, and sample position frozen.
                             out.fill(<$sample as cpal::Sample>::from_sample(0.0_f32));
                             return;
+                        }
+                        for packet in note_rx.try_iter() {
+                            Renderer::dispatch(&mut renderer.stems, packet);
                         }
                         for update in updates.try_iter() {
                             if let Some(micros) = update.reposition {
@@ -351,7 +372,12 @@ impl Playback {
                                 renderer.release_frame,
                                 renderer.rate,
                                 renderer.looping,
-                                renderer.levels.get() != [0; 3],
+                                renderer.levels.get() != [0; 3]
+                                    || renderer
+                                        .timeline
+                                        .buses
+                                        .iter()
+                                        .any(|bus| bus.effects() != [0; 3]),
                             );
                         }
                         let mut left = [0.0; 256];
@@ -405,6 +431,7 @@ impl Playback {
         };
         stream.play()?;
         Ok(Self {
+            notes: Some(notes),
             edits,
             progress,
             errors,
@@ -498,6 +525,7 @@ impl Playback {
                 state.done.store(true, Ordering::Relaxed);
             })?;
         Ok(Self {
+            notes: None,
             edits,
             progress,
             errors,
@@ -584,6 +612,14 @@ mod mix_tests {
         let shaped = render(&song);
         assert!(dry.iter().zip(shaped).any(|(a, b)| (a - b).abs() > 0.001));
         let piano_level = song.tracks[0].bus.rms();
+        let before_fx = render(&song);
+        song.tracks[1].bus.set_effect(2, 100);
+        let after_fx = render(&song);
+        assert!(before_fx
+            .iter()
+            .zip(after_fx)
+            .any(|(a, b)| (a - b).abs() > 0.001));
+        assert_eq!(song.tracks[0].bus.rms(), piano_level);
         song.tracks[1].set_setting(Some(7), 0);
         render(&song);
         assert_eq!(song.tracks[0].bus.rms(), piano_level);

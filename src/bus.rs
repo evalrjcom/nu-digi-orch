@@ -2,12 +2,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub struct Bus {
     settings: AtomicU32,
     meter: AtomicU32,
+    fx: AtomicU32,
 }
 impl Default for Bus {
     fn default() -> Self {
         Self {
             settings: AtomicU32::new(u32::from_le_bytes([12, 12, 100, 0])),
             meter: AtomicU32::new(0),
+            fx: AtomicU32::new(0),
         }
     }
 }
@@ -29,8 +31,21 @@ impl Bus {
     pub fn snapshot(&self) -> Self {
         Self {
             settings: AtomicU32::new(self.settings.load(Ordering::Relaxed)),
+            fx: AtomicU32::new(self.fx.load(Ordering::Relaxed)),
             ..Self::default()
         }
+    }
+    pub fn effects(&self) -> [u8; 3] {
+        let [reverb, chorus, delay, _] = self.fx.load(Ordering::Relaxed).to_le_bytes();
+        [reverb, chorus, delay]
+    }
+    pub fn set_effect(&self, index: usize, amount: u8) {
+        let mut bytes = self.effects();
+        bytes[index] = amount.min(100);
+        self.fx.store(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]),
+            Ordering::Relaxed,
+        );
     }
     pub fn rms(&self) -> f32 {
         f32::from_bits(self.meter.load(Ordering::Relaxed))

@@ -4,6 +4,7 @@ mod audio;
 mod bus;
 mod effects;
 mod gm;
+mod keyboard;
 mod mixer;
 mod recording;
 mod song;
@@ -64,6 +65,8 @@ enum Action {
     Preset,
     BrowsePresets,
     TogglePlayback,
+    VirtualKeyboard,
+    TrackEffect(usize, usize, u8),
     Jump(i8),
     Tempo,
     View,
@@ -262,6 +265,7 @@ struct Ui {
     arrangement: Frame,
     preset: fltk::browser::HoldBrowser,
     preset_window: Window,
+    keyboard: keyboard::Keyboard,
     last_stop: Option<std::time::Instant>,
     presets: Vec<(i32, i32)>,
     bpm: Input,
@@ -354,6 +358,11 @@ impl Ui {
                 Action::MixPreset(true, -1, 2, 85),
             ),
             ("Playback/SoundFont effects…", None, Action::Effects),
+            (
+                "Playback/Virtual piano…",
+                Some('k'),
+                Action::VirtualKeyboard,
+            ),
             ("Playback/Load SoundFont…", None, Action::LoadFont),
             ("Playback/Refresh Devices", None, Action::Refresh),
         ] {
@@ -629,6 +638,7 @@ impl Ui {
             arrangement,
             preset,
             preset_window,
+            keyboard: keyboard::Keyboard::new(),
             last_stop: None,
             presets: Vec::new(),
             bpm,
@@ -1180,6 +1190,28 @@ fn apply(
         return Err("Press Stop to finish the MIDI take first.".into());
     }
     match action {
+        Action::TrackEffect(track, effect, amount) => {
+            if let Some(track) = model.song.tracks.get(track) {
+                track.bus.set_effect(effect, amount);
+            }
+        }
+        Action::VirtualKeyboard => {
+            let font = model
+                .font
+                .as_ref()
+                .ok_or("Load an SF2 SoundFont to play the virtual piano.")?;
+            let device = ui
+                .audio_device
+                .value()
+                .checked_sub(1)
+                .and_then(|index| model.sound_devices.get(index as usize));
+            ui.keyboard.open(
+                font,
+                &model.song.tracks[model.track],
+                model.effects.clone(),
+                device,
+            )?;
+        }
         Action::BusValue(i, col, v) => {
             let bus = if i == usize::MAX {
                 &model.effects.1
