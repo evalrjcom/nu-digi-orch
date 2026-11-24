@@ -351,7 +351,7 @@ impl Song {
         track.rename(&format!("Take {}", index + 1));
         track.channel = events[0].1[0] & 15;
         let mut active = [[0_u32; 128]; 16];
-        let mut clock = self.tempo_clock();
+        let clock = self.tempo_clock();
         for (micros, [status, a, b]) in events {
             let channel = status & 15;
             let a = u7::from(a);
@@ -431,7 +431,7 @@ impl Song {
         index
     }
 
-    fn tempo_clock(&self) -> impl FnMut(u64) -> Tick {
+    pub fn tempo_clock(&self) -> impl Fn(u64) -> Tick + 'static {
         let mut tempos: Vec<_> = self
             .tracks
             .iter()
@@ -444,24 +444,20 @@ impl Song {
             })
             .collect();
         tempos.sort_by_key(|&(tick, _)| tick);
-        let mut tempos = tempos.into_iter().peekable();
-        let mut tempo = 500_000;
-        let mut previous_tick = 0;
-        let mut previous_time = 0;
+        // Store time in microseconds multiplied by PPQ to retain fractional ticks.
+        // A binary search also handles the clock jumping backwards when playback loops.
+        let mut segments = vec![(0_u128, 0_u64, 500_000_u32)];
+        for (tick, tempo) in tempos {
+            let &(time, previous_tick, previous_tempo) = segments.last().unwrap();
+            let time = time + u128::from(tick - previous_tick) * u128::from(previous_tempo);
+            segments.push((time, tick, tempo));
+        }
         let ppq = u128::from(self.ppq);
         move |micros| {
             let target = u128::from(micros) * ppq;
-            while let Some(&(tick, next_tempo)) = tempos.peek() {
-                let time = previous_time + u128::from(tick - previous_tick) * u128::from(tempo);
-                if time > target {
-                    break;
-                }
-                previous_tick = tick;
-                previous_time = time;
-                tempo = next_tempo;
-                tempos.next();
-            }
-            previous_tick + (target.saturating_sub(previous_time) / u128::from(tempo)) as Tick
+            let index = segments.partition_point(|&(time, _, _)| time <= target) - 1;
+            let (time, tick, tempo) = segments[index];
+            tick + ((target - time) / u128::from(tempo)) as Tick
         }
     }
 
@@ -681,6 +677,19 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playhead_follows_tempo_and_loop_rewind() {
+        let mut song = Song::new();
+        song.tracks[0]
+            .events
+            .push((480, Event::Meta(MetaMessage::Tempo(1_000_000.into()))));
+        let clock = song.tempo_clock();
+        assert_eq!(clock(500_000), 480);
+        assert_eq!(clock(1_000_000), 720);
+        assert_eq!(clock(250_000), 240);
+        assert_eq!(clock(0), 0);
+    }
 
     #[test]
     fn multitrack_midi_round_trip() {

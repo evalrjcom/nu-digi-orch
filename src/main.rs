@@ -3,6 +3,7 @@
 mod audio;
 mod recording;
 mod song;
+mod track_view;
 
 use fltk::{
     app::{self, MouseButton},
@@ -61,6 +62,8 @@ enum Action {
     Preset,
     Tempo,
     View,
+    ToggleEditor,
+    Lane(usize, bool),
     Play,
     Record,
     Stop,
@@ -92,6 +95,11 @@ struct Model {
     export_in_progress: bool,
     inputs: Vec<recording::InputPort>,
     view_beat: Tick,
+    track_view: bool,
+    lanes: Vec<Vec<Note>>,
+    playhead: Tick,
+    tick_at_time: Box<dyn Fn(u64) -> Tick>,
+    duration_micros: u64,
     high_key: u8,
     step: Tick,
 }
@@ -101,6 +109,11 @@ impl Model {
         let song = Song::new();
         Self {
             step: u64::from(song.ppq) / 4,
+            tick_at_time: Box::new(song.tempo_clock()),
+            track_view: true,
+            lanes: vec![],
+            playhead: 0,
+            duration_micros: 0,
             song,
             track: 0,
             notes: vec![],
@@ -238,6 +251,8 @@ struct Ui {
     duration: IntInput,
     velocity: IntInput,
     grid: Frame,
+    toggle_editor: Button,
+    note_controls: Vec<fltk::widget::Widget>,
     status: Frame,
     clock: Frame,
 }
@@ -340,21 +355,22 @@ impl Ui {
         preset.add_choice("SoundFont presets…");
         preset.set_value(0);
         preset.emit(tx, Action::Preset);
+        let mut note_controls = Vec::new();
         flat_label(249, 85, 81, 25, "First beat", 13, SUBTLE);
         let mut beat = number(323, 85, 65, 1);
-        flat_label(406, 85, 66, 25, "Top key", 13, SUBTLE);
+        note_controls.push(flat_label(406, 85, 66, 25, "Top key", 13, SUBTLE).as_base_widget());
         let mut pitch = number(472, 85, 56, 83);
         for field in [&mut beat, &mut pitch] {
             field.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
             field.emit(tx, Action::View);
         }
         button(536, 83, 50, "Go", tx, Action::View);
-        flat_label(605, 85, 42, 25, "Snap", 13, SUBTLE);
+        note_controls.push(flat_label(605, 85, 42, 25, "Snap", 13, SUBTLE).as_base_widget());
         let mut snap = Choice::new(647, 84, 93, 28, None);
         snap.add_choice("Quarter|Eighth|16th|32nd");
         snap.set_value(2);
         snap.emit(tx, Action::View);
-        flat_label(756, 85, 77, 25, "New length", 13, SUBTLE);
+        note_controls.push(flat_label(756, 85, 77, 25, "New length", 13, SUBTLE).as_base_widget());
         let mut length = Choice::new(834, 84, 93, 28, None);
         length.add_choice("Quarter|Eighth|16th|32nd");
         length.set_value(2);
@@ -364,12 +380,24 @@ impl Ui {
         let draw_model = Rc::clone(model);
         grid.draw(move |frame| {
             if let Ok(model) = draw_model.try_borrow() {
-                draw_grid(frame, &model);
+                let gutter = if model.track_view {
+                    track_view::draw_tracks(frame, &model);
+                    track_view::GUTTER
+                } else {
+                    draw_grid(frame, &model);
+                    LABEL
+                };
+                track_view::draw_playhead(frame, &model, gutter);
             }
         });
         let handle_model = Rc::clone(model);
         let mut drag = None;
         grid.handle(move |frame, event| {
+            if let Ok(model) = handle_model.try_borrow() {
+                if model.track_view {
+                    return track_view::handle(frame, &model, event, tx);
+                }
+            }
             let point = || {
                 let model = handle_model.try_borrow().ok()?;
                 grid_point(frame, &model, app::event_x(), app::event_y())
@@ -409,17 +437,28 @@ impl Ui {
                 _ => false,
             }
         });
-        flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE);
+        note_controls.push(flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE).as_base_widget());
         let start = number(323, 633, 75, 0);
-        flat_label(412, 634, 28, 24, "Key", 13, SUBTLE);
+        note_controls.push(flat_label(412, 634, 28, 24, "Key", 13, SUBTLE).as_base_widget());
         let key = number(445, 633, 49, 60);
-        flat_label(510, 634, 84, 24, "Length ticks", 13, SUBTLE);
+        note_controls
+            .push(flat_label(510, 634, 84, 24, "Length ticks", 13, SUBTLE).as_base_widget());
         let duration = number(593, 633, 70, 120);
-        flat_label(680, 634, 55, 24, "Velocity", 13, SUBTLE);
+        note_controls.push(flat_label(680, 634, 55, 24, "Velocity", 13, SUBTLE).as_base_widget());
         let velocity = number(741, 633, 51, 96);
-        button(808, 631, 62, "Apply", tx, Action::ApplyNote);
-        button(879, 631, 76, "Quantize", tx, Action::SnapNote);
-        button(964, 631, 66, "Delete", tx, Action::DeleteNote);
+        note_controls.push(button(808, 631, 62, "Apply", tx, Action::ApplyNote).as_base_widget());
+        note_controls.push(button(879, 631, 76, "Quantize", tx, Action::SnapNote).as_base_widget());
+        note_controls.push(button(964, 631, 66, "Delete", tx, Action::DeleteNote).as_base_widget());
+        note_controls.extend([
+            pitch.as_base_widget(),
+            snap.as_base_widget(),
+            length.as_base_widget(),
+            start.as_base_widget(),
+            key.as_base_widget(),
+            duration.as_base_widget(),
+            velocity.as_base_widget(),
+        ]);
+        let toggle_editor = button(938, 83, 95, "Piano roll", tx, Action::ToggleEditor);
         let mut midi_input = Choice::new(1045, 632, 119, 28, None);
         midi_input.add_choice("MIDI input…");
         midi_input.set_value(0);
@@ -437,7 +476,7 @@ impl Ui {
             682,
             780,
             32,
-            "Click to add or select a note • Drag to move • Right-click to delete",
+            "Select a track or double-click a lane to edit its notes.",
             13,
             SUBTLE,
         );
@@ -473,6 +512,8 @@ impl Ui {
             duration,
             velocity,
             grid,
+            toggle_editor,
+            note_controls,
             status,
             clock,
         }
@@ -522,7 +563,33 @@ impl Ui {
         self.beat.set_value(&(model.view_beat + 1).to_string());
         self.pitch.set_value(&model.high_key.to_string());
         model.step = division(model.song.ppq, self.snap.value());
-        model.notes = track.notes();
+        if model.track_view {
+            model.lanes = model
+                .song
+                .tracks
+                .iter()
+                .map(|track| track.notes())
+                .collect();
+            model.notes.clear();
+        } else {
+            model.notes = track.notes();
+            model.lanes.clear();
+        }
+        for control in &mut self.note_controls {
+            if model.track_view {
+                control.hide();
+            } else {
+                control.show();
+            }
+        }
+        self.toggle_editor.set_label(if model.track_view {
+            "Piano roll"
+        } else {
+            "Track view"
+        });
+        if model.playback.is_none() && model.recording.is_none() {
+            model.playhead = 0;
+        }
         if let Some(note) = model.selected {
             self.start.set_value(&note.start.to_string());
             self.key.set_value(&note.key.to_string());
@@ -531,6 +598,19 @@ impl Ui {
             self.velocity.set_value(&note.velocity.to_string());
         }
         self.grid.redraw();
+    }
+
+    fn advance_playhead(&mut self, model: &mut Model, micros: u64) {
+        let tick = (model.tick_at_time)(micros);
+        if tick != model.playhead {
+            model.playhead = tick;
+            let beat = tick / u64::from(model.song.ppq);
+            if beat < model.view_beat || beat >= model.view_beat + BEATS {
+                model.view_beat = beat / BEATS * BEATS;
+                self.beat.set_value(&(model.view_beat + 1).to_string());
+            }
+            self.grid.redraw();
+        }
     }
 
     fn set_font(&mut self, model: &mut Model, path: &Path) -> song::Result<()> {
@@ -829,12 +909,35 @@ fn apply(
     if model.recording.is_some()
         && !matches!(
             action,
-            Action::Stop | Action::OutputChanged | Action::View | Action::SelectTrack
+            Action::Stop
+                | Action::OutputChanged
+                | Action::View
+                | Action::SelectTrack
+                | Action::Lane(..)
+                | Action::ToggleEditor
         )
     {
         return Err("Press Stop to finish the MIDI take first.".into());
     }
     match action {
+        Action::ToggleEditor => {
+            model.track_view = !model.track_view;
+            ui.status.set_label(if model.track_view {
+                "Select a track or double-click a lane to edit its notes."
+            } else {
+                "Click to add or select a note • Drag to move • Right-click to delete"
+            });
+        }
+        Action::Lane(index, edit_notes) => {
+            if index < model.song.tracks.len() {
+                model.track = index;
+                model.selected = None;
+                if edit_notes {
+                    model.track_view = false;
+                    model.fit_pitch();
+                }
+            }
+        }
         Action::Quit => {
             if model.export_in_progress {
                 return Err("Wait for the WAV export to finish before closing.".into());
@@ -1021,6 +1124,8 @@ fn apply(
                 return Err("Add notes to an audible track before playing.".into());
             }
             model.playback = None;
+            model.tick_at_time = Box::new(model.song.tempo_clock());
+            model.duration_micros = timeline.duration;
             let looping = ui.looping.value();
             model.playback = Some(if ui.output.value() > 0 {
                 let port = model
@@ -1041,6 +1146,8 @@ fn apply(
                 };
                 audio::Playback::software(font, timeline, looping, device)?
             });
+            model.view_beat = 0;
+            model.playhead = 0;
             ui.status.set_label("Playing");
         }
         Action::Record => {
@@ -1049,6 +1156,9 @@ fn apply(
             model.playback = None;
             model.captured.clear();
             model.recording = Some(recording::Recording::start(&port.port)?);
+            model.view_beat = 0;
+            model.playhead = 0;
+            model.tick_at_time = Box::new(model.song.tempo_clock());
             ui.status
                 .set_label("Recording MIDI from the start. Press Stop to keep the take.");
         }
@@ -1240,7 +1350,9 @@ fn main() {
             let model = &mut *model;
             if let Some(recording) = &model.recording {
                 recording.drain(&mut model.captured);
-                let elapsed = recording.elapsed() / 100_000;
+                let micros = recording.elapsed();
+                let elapsed = micros / 100_000;
+                ui.advance_playhead(model, micros);
                 ui.clock.set_label(&format!(
                     "{:02}:{:02}.{}",
                     elapsed / 600,
@@ -1249,7 +1361,12 @@ fn main() {
                 ));
             }
         } else if let Some(playback) = &model.playback {
-            let elapsed = playback.progress.position.load(Ordering::Relaxed) / 100_000;
+            let micros = playback
+                .progress
+                .position
+                .load(Ordering::Relaxed)
+                .min(model.duration_micros);
+            let elapsed = micros / 100_000;
             let label = format!(
                 "{:02}:{:02}.{}",
                 elapsed / 600,
@@ -1266,6 +1383,7 @@ fn main() {
                 model.playback = None;
                 ui.status.set_label("Playback finished.");
             }
+            ui.advance_playhead(&mut model, micros);
         }
     }
 }
