@@ -52,6 +52,41 @@ impl State {
         }
     }
 
+    fn handle_keys(&mut self, event: Event, allow_press: bool) -> bool {
+        if event == Event::Unfocus {
+            self.release();
+            return false;
+        }
+        if !matches!(event, Event::KeyDown | Event::KeyUp) {
+            return false;
+        }
+        let down = event == Event::KeyDown;
+        let key = app::event_key();
+        if down
+            && (!allow_press
+                || app::event_state().intersects(Shortcut::Ctrl | Shortcut::Alt | Shortcut::Meta))
+        {
+            return false;
+        }
+        if down && matches!(key, Key::Left | Key::Right) {
+            self.release();
+            self.base = if key == Key::Left {
+                self.base.saturating_sub(12)
+            } else {
+                (self.base + 12).min(96)
+            };
+            return true;
+        }
+        let Some(index) = KEYS.bytes().position(|c| key == Key::from_char(c as char)) else {
+            return false;
+        };
+        if !down && !self.held[index] {
+            return false;
+        }
+        self.change(index, down, false);
+        true
+    }
+
     fn release(&mut self) {
         if let Some(index) = self.mouse {
             self.change(index, false, true);
@@ -194,50 +229,22 @@ impl Keyboard {
         let mut display = keys.clone();
         window.handle(move |_, event| {
             let mut s = shared.borrow_mut();
-            match event {
-                Event::Unfocus => s.release(),
-                Event::KeyDown | Event::KeyUp => {
-                    let down = event == Event::KeyDown;
-                    let key = app::event_key();
-                    if down && key == Key::Escape && s.capture.is_some() {
-                        tx.send(Action::Stop);
-                        return true;
-                    }
-                    if down && matches!(key, Key::Left | Key::Right) {
-                        s.release();
-                        s.base = if key == Key::Left {
-                            s.base.saturating_sub(12)
-                        } else {
-                            (s.base + 12).min(96)
-                        };
-                    } else if let Some(index) =
-                        KEYS.bytes().position(|c| key == Key::from_char(c as char))
-                    {
-                        if down
-                            && app::event_state()
-                                .intersects(Shortcut::Ctrl | Shortcut::Alt | Shortcut::Meta)
-                        {
-                            return false;
-                        }
-                        s.change(index, down, false);
-                    } else {
-                        return false;
-                    }
-                }
-                _ => return false,
+            if event == Event::KeyDown && app::event_key() == Key::Escape && s.capture.is_some() {
+                tx.send(Action::Stop);
+                return true;
             }
-            display.redraw();
-            true
+            let handled = s.handle_keys(event, true);
+            if handled || event == Event::Unfocus {
+                display.redraw();
+            }
+            handled
         });
         let shared = state.clone();
         window.set_callback(move |w| {
             let mut s = shared.borrow_mut();
             s.release();
             s.docked = true;
-            if s.capture.is_none() {
-                s.sender = None;
-                s.stream = None;
-            }
+            drop(s);
             w.hide();
         });
         let mut dock = fltk::button::Button::new(622, 8, 84, 28, "Dock");
@@ -247,10 +254,7 @@ impl Keyboard {
             let mut state = shared.borrow_mut();
             state.release();
             state.docked = true;
-            if state.capture.is_none() {
-                state.sender = None;
-                state.stream = None;
-            }
+            drop(state);
             dock_window.hide();
         });
         window.end();
@@ -265,14 +269,20 @@ impl Keyboard {
         self.state.borrow().docked
     }
 
+    pub fn docked_keys(&self) -> impl Fn(Event, bool) -> bool + 'static {
+        let shared = self.state.clone();
+        move |event, allow_press| {
+            let Ok(mut state) = shared.try_borrow_mut() else {
+                return false;
+            };
+            state.docked && state.handle_keys(event, allow_press)
+        }
+    }
+
     pub fn capture(&self, capture: Option<crate::recording::Capture>) {
         let mut state = self.state.borrow_mut();
         state.release();
         state.capture = capture;
-        if state.docked && state.capture.is_none() {
-            state.sender = None;
-            state.stream = None;
-        }
     }
 
     pub fn open(
@@ -282,7 +292,7 @@ impl Keyboard {
         levels: Arc<effects::Levels>,
         device: Option<&audio::SoundDevice>,
     ) -> song::Result<()> {
-        if !self.window.shown() && self.state.borrow().capture.is_none() {
+        if self.state.borrow().stream.is_none() {
             let channel = track.channel;
             let timeline = song::Timeline {
                 instrument_tracks: vec![0],

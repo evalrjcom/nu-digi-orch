@@ -678,7 +678,10 @@ impl Ui {
         audio_device.set_value(0);
         audio_device.set_tooltip("Audio destination for the software SoundFont synthesizer.");
         audio_device.emit(tx, Action::OutputChanged);
-        let piano_dock = button(1035, 631, 129, "Virtual piano", tx, Action::VirtualKeyboard);
+        let mut piano_dock = button(1035, 631, 129, "Virtual piano", tx, Action::VirtualKeyboard);
+        piano_dock.set_tooltip(
+            "Open the piano. Its note keys stay playable in the main window when docked.",
+        );
         let status = flat_label(
             16,
             682,
@@ -2414,6 +2417,7 @@ fn update_note(model: &mut Model, original: Note, changed: Note) -> song::Result
 struct SpaceShortcut {
     window: usize,
     text_fields: [usize; 7],
+    docked_piano: Box<dyn Fn(Event, bool) -> bool>,
     sender: app::Sender<Action>,
     held: bool,
 }
@@ -2437,6 +2441,7 @@ fn install_space_shortcut(ui: &Ui, sender: app::Sender<Action>) {
             ]
             .map(|ptr| ptr as usize),
             sender,
+            docked_piano: Box::new(ui.keyboard.docked_keys()),
             held: false,
         });
     });
@@ -2473,14 +2478,17 @@ fn install_space_shortcut(ui: &Ui, sender: app::Sender<Action>) {
                         return true;
                     }
                 }
+                let editing_text = app::focus()
+                    .is_some_and(|w| shortcut.text_fields.contains(&(w.as_widget_ptr() as usize)));
+                if (shortcut.docked_piano)(event, !editing_text) {
+                    return true;
+                }
                 let modified =
                     app::event_state().intersects(Shortcut::Ctrl | Shortcut::Alt | Shortcut::Meta);
                 if event != Event::KeyDown || app::event_key() != Key::from_char(' ') || modified {
                     return false;
                 }
-                if app::focus()
-                    .is_some_and(|w| shortcut.text_fields.contains(&(w.as_widget_ptr() as usize)))
-                {
+                if editing_text {
                     return false;
                 }
                 if !shortcut.held {

@@ -98,7 +98,7 @@ Toggle **Metronome** before or during playback or recording. Use the pattern sel
 
 Choose **Playback → Count-in** for zero, one, or two bars before recording. Choose **Count-in sound** for Click, Cowbell, or Side stick. The count uses the tempo at the entry point and four beats per bar. Recording starts after the count, and count-in notes stay out of saves and exports. Cowbell and Side stick are also available in the live metronome selector.
 
-Click **Dock** on the virtual piano to hide it. The main window’s piano button shows whether the piano is docked during playback or recording. Click that button to bring the piano back. Existing hardware MIDI capture continues when the piano is docked.
+Click **Dock** on the virtual piano to hide it. The main window’s piano button shows whether the piano is docked during playback or recording. Click that button to bring the piano back. While docked, play from the main window with the same computer keys. The left and right arrows still shift the piano octave, and the transport shortcuts and text inputs keep their usual behavior. Existing hardware MIDI capture continues when the piano is docked.
 
 The boxes beside the clock show the recognized chord, MIDI key signature at the playhead, and cumulative transposition in semitones since opening the file. Use the Key arrows to add or remove one sharp at the playhead, preserving major or minor mode. The Transpose arrows shift the song by one semitone. Chords come from overlapping notes on audible melodic tracks. Use **Edit → Set key signature** at the playhead to save a major or minor key change, or **Edit → Transpose song** to shift all melodic notes and key signatures by a signed number of semitones. General MIDI drums keep their original pitches.
 
