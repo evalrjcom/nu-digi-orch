@@ -886,13 +886,16 @@ fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
     let Some(playback) = &model.playback else {
         return;
     };
-    let old_position = model.offset + playback.progress.position.load(Ordering::Relaxed);
+    let old_position = model
+        .offset
+        .saturating_add(playback.progress.position.load(Ordering::Relaxed));
     let tick = (model.tick_at_time)(old_position);
     let end_tick = (model.tick_at_time)(model.duration_micros);
     let clock = model.song.tempo_clock();
     let time_for = |tick| {
         let mut lo = 0;
-        let mut hi = u64::MAX / 1_000_000;
+        // The tempo clock saturates, so long songs can use the full microsecond range.
+        let mut hi = u64::MAX;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if clock(mid) < tick {
@@ -1281,7 +1284,8 @@ fn apply(
             model.cue = 0;
             model.view_beat = 0;
             if let Some(recording) = model.recording.take() {
-                let (duration, events) = recording.finish(std::mem::take(&mut model.captured));
+                let (duration, events, dropped) =
+                    recording.finish(std::mem::take(&mut model.captured));
                 if events.is_empty() {
                     ui.status.set_label("The MIDI take was empty.");
                 } else {
@@ -1290,7 +1294,13 @@ fn apply(
                     model.fit_pitch();
                     model.selected = None;
                     model.view_beat = 0;
-                    ui.status.set_label("MIDI take added.");
+                    if dropped == 0 {
+                        ui.status.set_label("MIDI take added.");
+                    } else {
+                        ui.status.set_label(&format!(
+                            "Take added. Input queue overflow dropped {dropped} MIDI messages."
+                        ));
+                    }
                 }
                 ui.clock.set_label("00:00.0");
                 return Ok(true);

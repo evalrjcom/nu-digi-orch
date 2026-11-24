@@ -137,7 +137,8 @@ impl Renderer {
         let mut settings = SynthesizerSettings::new(rate as i32);
         settings.block_size = 32;
         let synth = Synthesizer::new(font, &settings)?;
-        let release_frame = frames(timeline.duration, rate);
+        // A sub-sample loop still needs one frame to make progress in the callback.
+        let release_frame = frames(timeline.duration, rate).max(1);
         Ok(Self {
             synth,
             timeline,
@@ -248,7 +249,7 @@ impl Playback {
                                 frames(p.micros, renderer.rate) < renderer.frame
                             });
                             renderer.release_frame =
-                                frames(renderer.timeline.duration, renderer.rate);
+                                frames(renderer.timeline.duration, renderer.rate).max(1);
                             renderer.end_frame = renderer.release_frame
                                 + if renderer.looping {
                                     0
@@ -276,7 +277,8 @@ impl Playback {
                             }
                         }
                         state.position.store(
-                            renderer.frame * 1_000_000 / u64::from(renderer.rate),
+                            (u128::from(renderer.frame) * 1_000_000 / u128::from(renderer.rate))
+                                as u64,
                             Ordering::Relaxed,
                         );
                         state.done.store(
@@ -357,8 +359,15 @@ impl Playback {
                                 break 'play;
                             }
                         }
+                        // Preserve pending events that became due between worker polls.
+                        // Only an explicit reposition may discard that interval.
+                        let boundary = if update.reposition.is_some() {
+                            elapsed
+                        } else {
+                            timeline.packets.get(index).map_or(u64::MAX, |p| p.micros)
+                        };
                         timeline = update.timeline;
-                        index = timeline.packets.partition_point(|p| p.micros < elapsed);
+                        index = timeline.packets.partition_point(|p| p.micros < boundary);
                     }
                     state.position.store(elapsed, Ordering::Relaxed);
                     while let Some(p) = timeline.packets.get(index).filter(|p| p.micros <= elapsed)

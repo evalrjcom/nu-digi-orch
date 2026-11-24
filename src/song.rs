@@ -96,6 +96,8 @@ pub struct Timeline {
 
 impl Timeline {
     pub fn seek(&mut self, offset: u64) {
+        // Clamp a stale cue after edits shorten the arrangement.
+        let offset = offset.min(self.duration);
         if offset == 0 {
             return;
         }
@@ -500,7 +502,9 @@ impl Song {
             let target = u128::from(micros) * ppq;
             let index = segments.partition_point(|&(time, _, _)| time <= target) - 1;
             let (time, tick, tempo) = segments[index];
-            tick + ((target - time) / u128::from(tempo)) as Tick
+            // Saturate extreme transport times instead of wrapping back into the song.
+            (u128::from(tick) + (target - time) / u128::from(tempo)).min(u128::from(Tick::MAX))
+                as Tick
         }
     }
 
@@ -701,7 +705,7 @@ impl Song {
                         }
                     };
                     packets.push(Packet {
-                        micros: (elapsed / ppq) as u64,
+                        micros: (elapsed / ppq).min(u128::from(u64::MAX)) as u64,
                         bytes: [status | channel, a, b],
                         len,
                     });
@@ -712,7 +716,7 @@ impl Song {
         elapsed += u128::from(end - previous) * u128::from(tempo);
         Timeline {
             packets,
-            duration: (elapsed / ppq) as u64,
+            duration: (elapsed / ppq).min(u128::from(u64::MAX)) as u64,
         }
     }
 }
@@ -720,6 +724,24 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeking_past_end_preserves_zero_remaining_duration() {
+        let mut timeline = Song::demo().timeline();
+        timeline.seek(u64::MAX);
+        assert_eq!(timeline.duration, 0);
+        assert!(timeline.packets.iter().all(|p| p.micros == 0));
+    }
+
+    #[test]
+    fn extreme_time_saturates_instead_of_wrapping() {
+        let mut song = Song::new();
+        song.ppq = 32767;
+        song.tracks[0]
+            .events
+            .push((0, Event::Meta(MetaMessage::Tempo(1.into()))));
+        assert_eq!(song.tempo_clock()(u64::MAX), Tick::MAX);
+    }
 
     #[test]
     fn playhead_follows_tempo_and_loop_rewind() {
