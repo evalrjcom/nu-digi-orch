@@ -4,7 +4,9 @@ Nu Digi Orch is a lightweight desktop MIDI composer in Rust and FLTK. It combine
 
 ## Track view and playhead
 
-The composer opens in **Track view** with a lane for each MIDI track. The horizontal ruler counts quarter-note beats. Each note appears at its start time with its duration and relative pitch. Select a lane to show its track settings. Scroll through the lanes or use the track list to reach additional tracks. Double-click a lane or choose **Piano roll** to edit its notes. Choose **Track view** to return to the arrangement.
+The composer opens in split view. The upper table combines track names, channel, program, bank, volume, pan, mute, and solo with the arrangement lanes. Click a row to edit that track in the piano roll below. Double-click a name or numeric cell to edit it, or click M or S to toggle mute or solo. Scroll over the table to reach additional tracks.
+
+Choose **Full roll** or double-click an arrangement lane to expand the piano roll across the editing area. **Split view** restores the table. Both panes share the same beat grid and playback position.
 
 During playback and recording, the amber vertical line marks the current musical position in both views. It follows tempo changes, advances to the next 16-beat page, and returns to the beginning during loop playback.
 
@@ -14,7 +16,7 @@ During playback and recording, the amber vertical line marks the current musical
 2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system default or a device selected in **Audio device**. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
 3. Press **Play** or activate **Loop** before playback. To send MIDI to hardware or another application, select its port in **Output**.
 4. Double-click a track lane to open its piano roll. Click the piano roll to add or select a note. Drag a note to move it in pitch and time. Right-click or press Delete with the roll focused to remove a note. The note fields below the roll set exact tick position, pitch, duration, and velocity. **Snap** controls the edit grid, and **New length** controls the duration of newly drawn notes.
-5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in **Track settings**. Channel 10 is percussion in General MIDI. With an SF2 loaded, you can also choose a named preset. Tracks sharing a MIDI channel share its patch and controllers. Mute and Solo control playback and WAV export for the current session.
+5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. With an SF2 loaded, you can also choose a named preset. Tracks sharing a MIDI channel share its patch and controllers. Mute and Solo control playback and WAV export for the current session.
 6. Pick a port in **MIDI input…**, then press **Record MIDI**. The app captures a take from the start of the timeline. Play or monitor the instrument on your MIDI device during capture. **Stop** adds the take as a new editable track.
 7. Save a standard MIDI file, or use **File → Export WAV** to mix the audible tracks to a stereo 44.1 kHz, 16-bit WAV with the loaded SoundFont.
 

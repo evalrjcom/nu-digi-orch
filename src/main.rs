@@ -7,7 +7,6 @@ mod track_view;
 
 use fltk::{
     app::{self, MouseButton},
-    browser::HoldBrowser,
     button::{Button, CheckButton},
     dialog, draw,
     enums::{Align, Color, Event, Font, FrameType, Key, Shortcut},
@@ -57,8 +56,7 @@ enum Action {
     Redo,
     AddTrack,
     RemoveTrack,
-    SelectTrack,
-    TrackSettings,
+    Cell(usize, usize),
     Preset,
     Tempo,
     View,
@@ -225,17 +223,9 @@ fn menu_item(
 
 struct Ui {
     win: Window,
-    tracks: HoldBrowser,
-    name: Input,
-    channel: IntInput,
-    patch: IntInput,
-    bank: IntInput,
+    arrangement: Frame,
     preset: Choice,
     presets: Vec<(i32, i32)>,
-    volume: IntInput,
-    pan: IntInput,
-    mute: CheckButton,
-    solo: CheckButton,
     bpm: Input,
     output: Choice,
     audio_device: Choice,
@@ -252,7 +242,7 @@ struct Ui {
     velocity: IntInput,
     grid: Frame,
     toggle_editor: Button,
-    note_controls: Vec<fltk::widget::Widget>,
+
     status: Frame,
     clock: Frame,
 }
@@ -311,93 +301,54 @@ impl Ui {
         flat_label(16, 83, 100, 27, "Tracks", 16, TEXT);
         button(125, 83, 49, "+", tx, Action::AddTrack);
         button(181, 83, 50, "−", tx, Action::RemoveTrack);
-        let mut tracks = HoldBrowser::new(16, 120, 215, 222, None);
-        tracks.set_color(PANEL);
-        tracks.emit(tx, Action::SelectTrack);
-        flat_label(16, 354, 195, 25, "Track settings", 16, TEXT);
-        let mut name = Input::new(16, 385, 215, 26, None);
-        name.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
-        name.emit(tx, Action::TrackSettings);
-        let mut fields = Vec::new();
-        for (row, label) in [
-            "MIDI channel (1–16)",
-            "Program (0–127)",
-            "Bank (CC0)",
-            "Volume (CC7)",
-            "Pan (CC10)",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let y = 420 + row as i32 * 29;
-            flat_label(17, y, 151, 25, label, 13, SUBTLE);
-            let mut field = number(172, y, 59, 0);
-            field.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
-            field.emit(tx, Action::TrackSettings);
-            fields.push(field);
-        }
-        let [channel, patch, bank, volume, pan] =
-            fields.try_into().unwrap_or_else(|_| unreachable!());
-        let mut mute = CheckButton::new(16, 567, 90, 29, "Mute");
-        let mut solo = CheckButton::new(112, 567, 90, 29, "Solo");
-        mute.emit(tx, Action::TrackSettings);
-        solo.emit(tx, Action::TrackSettings);
-        button(
-            16,
-            601,
-            215,
-            "Apply track settings",
-            tx,
-            Action::TrackSettings,
-        );
-
-        let mut preset = Choice::new(16, 640, 215, 29, None);
+        let mut preset = Choice::new(16, 633, 215, 29, None);
         preset.add_choice("SoundFont presets…");
         preset.set_value(0);
         preset.emit(tx, Action::Preset);
-        let mut note_controls = Vec::new();
         flat_label(249, 85, 81, 25, "First beat", 13, SUBTLE);
         let mut beat = number(323, 85, 65, 1);
-        note_controls.push(flat_label(406, 85, 66, 25, "Top key", 13, SUBTLE).as_base_widget());
+        flat_label(406, 85, 66, 25, "Top key", 13, SUBTLE);
         let mut pitch = number(472, 85, 56, 83);
         for field in [&mut beat, &mut pitch] {
             field.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
             field.emit(tx, Action::View);
         }
         button(536, 83, 50, "Go", tx, Action::View);
-        note_controls.push(flat_label(605, 85, 42, 25, "Snap", 13, SUBTLE).as_base_widget());
+        flat_label(605, 85, 42, 25, "Snap", 13, SUBTLE);
         let mut snap = Choice::new(647, 84, 93, 28, None);
         snap.add_choice("Quarter|Eighth|16th|32nd");
         snap.set_value(2);
         snap.emit(tx, Action::View);
-        note_controls.push(flat_label(756, 85, 77, 25, "New length", 13, SUBTLE).as_base_widget());
+        flat_label(756, 85, 77, 25, "New length", 13, SUBTLE);
         let mut length = Choice::new(834, 84, 93, 28, None);
         length.add_choice("Quarter|Eighth|16th|32nd");
         length.set_value(2);
 
-        let mut grid = Frame::new(249, 120, WIDTH - 265, 502, None);
+        let mut arrangement = Frame::new(16, 120, WIDTH - 32, 230, None);
+        let data = Rc::clone(model);
+        arrangement.draw(move |f| {
+            if let Ok(m) = data.try_borrow() {
+                track_view::draw_tracks(f, &m);
+                track_view::draw_playhead(f, &m, track_view::GUTTER);
+            }
+        });
+        let data = Rc::clone(model);
+        arrangement.handle(move |f, e| {
+            data.try_borrow()
+                .is_ok_and(|m| track_view::handle(f, &m, e, tx))
+        });
+        let mut grid = Frame::new(16, 350, WIDTH - 32, 272, None);
         grid.set_frame(FrameType::FlatBox);
-        let draw_model = Rc::clone(model);
-        grid.draw(move |frame| {
-            if let Ok(model) = draw_model.try_borrow() {
-                let gutter = if model.track_view {
-                    track_view::draw_tracks(frame, &model);
-                    track_view::GUTTER
-                } else {
-                    draw_grid(frame, &model);
-                    LABEL
-                };
-                track_view::draw_playhead(frame, &model, gutter);
+        let data = Rc::clone(model);
+        grid.draw(move |f| {
+            if let Ok(m) = data.try_borrow() {
+                draw_grid(f, &m);
+                track_view::draw_playhead(f, &m, roll_gutter(&m));
             }
         });
         let handle_model = Rc::clone(model);
         let mut drag = None;
         grid.handle(move |frame, event| {
-            if let Ok(model) = handle_model.try_borrow() {
-                if model.track_view {
-                    return track_view::handle(frame, &model, event, tx);
-                }
-            }
             let point = || {
                 let model = handle_model.try_borrow().ok()?;
                 grid_point(frame, &model, app::event_x(), app::event_y())
@@ -437,27 +388,17 @@ impl Ui {
                 _ => false,
             }
         });
-        note_controls.push(flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE).as_base_widget());
+        flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE);
         let start = number(323, 633, 75, 0);
-        note_controls.push(flat_label(412, 634, 28, 24, "Key", 13, SUBTLE).as_base_widget());
+        flat_label(412, 634, 28, 24, "Key", 13, SUBTLE);
         let key = number(445, 633, 49, 60);
-        note_controls
-            .push(flat_label(510, 634, 84, 24, "Length ticks", 13, SUBTLE).as_base_widget());
+        flat_label(510, 634, 84, 24, "Length ticks", 13, SUBTLE);
         let duration = number(593, 633, 70, 120);
-        note_controls.push(flat_label(680, 634, 55, 24, "Velocity", 13, SUBTLE).as_base_widget());
+        flat_label(680, 634, 55, 24, "Velocity", 13, SUBTLE);
         let velocity = number(741, 633, 51, 96);
-        note_controls.push(button(808, 631, 62, "Apply", tx, Action::ApplyNote).as_base_widget());
-        note_controls.push(button(879, 631, 76, "Quantize", tx, Action::SnapNote).as_base_widget());
-        note_controls.push(button(964, 631, 66, "Delete", tx, Action::DeleteNote).as_base_widget());
-        note_controls.extend([
-            pitch.as_base_widget(),
-            snap.as_base_widget(),
-            length.as_base_widget(),
-            start.as_base_widget(),
-            key.as_base_widget(),
-            duration.as_base_widget(),
-            velocity.as_base_widget(),
-        ]);
+        button(808, 631, 62, "Apply", tx, Action::ApplyNote);
+        button(879, 631, 76, "Quantize", tx, Action::SnapNote);
+        button(964, 631, 66, "Delete", tx, Action::DeleteNote);
         let toggle_editor = button(938, 83, 95, "Piano roll", tx, Action::ToggleEditor);
         let mut midi_input = Choice::new(1045, 632, 119, 28, None);
         midi_input.add_choice("MIDI input…");
@@ -483,20 +424,26 @@ impl Ui {
 
         win.end();
         win.resizable(&grid);
+        let layout_grid = grid.clone();
+        let layout_tracks = arrangement.clone();
+        win.resize_callback(move |_, _, _, w, h| {
+            let mut grid = layout_grid.clone();
+            let mut tracks = layout_tracks.clone();
+            let height = h - 228;
+            let split = if tracks.visible() {
+                height * 45 / 100
+            } else {
+                0
+            };
+            tracks.resize(16, 120, w - 32, split.max(1));
+            grid.resize(16, 120 + split, w - 32, height - split);
+        });
         win.set_callback(move |_| tx.send(Action::Quit));
         Self {
             win,
-            tracks,
-            name,
-            channel,
-            patch,
-            bank,
+            arrangement,
             preset,
             presets: Vec::new(),
-            volume,
-            pan,
-            mute,
-            solo,
             bpm,
             output,
             audio_device,
@@ -513,7 +460,7 @@ impl Ui {
             velocity,
             grid,
             toggle_editor,
-            note_controls,
+
             status,
             clock,
         }
@@ -531,22 +478,7 @@ impl Ui {
             if model.dirty { "* " } else { "" },
             path
         ));
-        self.tracks.clear();
-        for (index, track) in model.song.tracks.iter().enumerate() {
-            let suffix = match (track.mute, track.solo) {
-                (true, _) => "  [M]",
-                (_, true) => "  [S]",
-                _ => "",
-            };
-            self.tracks
-                .add(&format!("{:02}  {}{}", index + 1, track.name(), suffix));
-        }
-        self.tracks.select((model.track + 1) as i32);
         let track = &model.song.tracks[model.track];
-        self.name.set_value(&track.name());
-        self.channel.set_value(&(track.channel + 1).to_string());
-        self.patch.set_value(&track.setting(None).to_string());
-        self.bank.set_value(&track.setting(Some(0)).to_string());
         let bank = i32::from(track.setting(Some(0))) + if track.channel == 9 { 128 } else { 0 };
         let program = i32::from(track.setting(None));
         self.preset.set_value(
@@ -555,10 +487,6 @@ impl Ui {
                 .position(|&(b, p)| b == bank && p == program)
                 .map_or(0, |i| i as i32 + 1),
         );
-        self.volume.set_value(&track.setting(Some(7)).to_string());
-        self.pan.set_value(&track.setting(Some(10)).to_string());
-        self.mute.set_value(track.mute);
-        self.solo.set_value(track.solo);
         self.bpm.set_value(&format!("{:.3}", model.song.bpm()));
         self.beat.set_value(&(model.view_beat + 1).to_string());
         self.pitch.set_value(&model.high_key.to_string());
@@ -570,22 +498,29 @@ impl Ui {
                 .iter()
                 .map(|track| track.notes())
                 .collect();
-            model.notes.clear();
+            model.notes.clone_from(&model.lanes[model.track]);
         } else {
             model.notes = track.notes();
             model.lanes.clear();
         }
-        for control in &mut self.note_controls {
-            if model.track_view {
-                control.hide();
-            } else {
-                control.show();
-            }
-        }
-        self.toggle_editor.set_label(if model.track_view {
-            "Piano roll"
+        let width = self.win.w() - 32;
+        let height = self.win.h() - 228;
+        let split = if model.track_view {
+            height * 45 / 100
         } else {
-            "Track view"
+            0
+        };
+        self.arrangement.resize(16, 120, width, split.max(1));
+        if model.track_view {
+            self.arrangement.show();
+        } else {
+            self.arrangement.hide();
+        }
+        self.grid.resize(16, 120 + split, width, height - split);
+        self.toggle_editor.set_label(if model.track_view {
+            "Full roll"
+        } else {
+            "Split view"
         });
         if model.playback.is_none() && model.recording.is_none() {
             model.playhead = 0;
@@ -598,6 +533,7 @@ impl Ui {
             self.velocity.set_value(&note.velocity.to_string());
         }
         self.grid.redraw();
+        self.arrangement.redraw();
     }
 
     fn advance_playhead(&mut self, model: &mut Model, micros: u64) {
@@ -610,6 +546,7 @@ impl Ui {
                 self.beat.set_value(&(model.view_beat + 1).to_string());
             }
             self.grid.redraw();
+            self.arrangement.redraw();
         }
     }
 
@@ -725,10 +662,18 @@ fn division(ppq: u16, choice: i32) -> Tick {
     (u64::from(ppq) / (1 << choice.clamp(0, 3))).max(1)
 }
 
+fn roll_gutter(model: &Model) -> i32 {
+    if model.track_view {
+        track_view::GUTTER
+    } else {
+        LABEL
+    }
+}
+
 fn grid_point(grid: &Frame, model: &Model, x: i32, y: i32) -> Option<GridPoint> {
-    let x = x - grid.x() - LABEL;
+    let x = x - grid.x() - roll_gutter(model);
     let y = y - grid.y() - RULER;
-    let width = grid.w() - LABEL;
+    let width = grid.w() - roll_gutter(model);
     let height = grid.h() - RULER;
     if !(0..width).contains(&x) || !(0..height).contains(&y) {
         return None;
@@ -742,7 +687,7 @@ fn grid_point(grid: &Frame, model: &Model, x: i32, y: i32) -> Option<GridPoint> 
 
 fn draw_grid(grid: &Frame, model: &Model) {
     let (x, y, w, h) = (grid.x(), grid.y(), grid.w(), grid.h());
-    let width = w - LABEL;
+    let width = w - roll_gutter(model);
     let height = h - RULER;
     draw::push_clip(x, y, w, h);
     draw::draw_rect_fill(x, y, w, h, PANEL);
@@ -757,7 +702,7 @@ fn draw_grid(grid: &Frame, model: &Model) {
         draw::draw_rect_fill(
             x,
             top,
-            LABEL,
+            roll_gutter(model),
             bottom - top,
             if black {
                 BG
@@ -766,7 +711,7 @@ fn draw_grid(grid: &Frame, model: &Model) {
             },
         );
         draw::draw_rect_fill(
-            x + LABEL,
+            x + roll_gutter(model),
             top,
             width,
             bottom - top,
@@ -790,7 +735,7 @@ fn draw_grid(grid: &Frame, model: &Model) {
             &format!("{name}{}", i32::from(key / 12) - 1),
             x + 5,
             top,
-            LABEL - 5,
+            roll_gutter(model) - 5,
             bottom - top,
             Align::Inside | Align::Left,
         );
@@ -799,12 +744,12 @@ fn draw_grid(grid: &Frame, model: &Model) {
     if model.step < u64::from(model.song.ppq) {
         draw::set_draw_color(Color::from_rgb(41, 52, 67));
         for offset in (next_step..shown_ticks).step_by(model.step as usize) {
-            let line = x + LABEL + (offset * width as u64 / shown_ticks) as i32;
+            let line = x + roll_gutter(model) + (offset * width as u64 / shown_ticks) as i32;
             draw::draw_line(line, y + RULER, line, y + h);
         }
     }
     for beat in 0..BEATS {
-        let line = x + LABEL + (beat * width as u64 / BEATS) as i32;
+        let line = x + roll_gutter(model) + (beat * width as u64 / BEATS) as i32;
         let beat = model.view_beat + beat;
         draw::set_draw_color(if beat.is_multiple_of(4) {
             SUBTLE
@@ -831,10 +776,10 @@ fn draw_grid(grid: &Frame, model: &Model) {
             continue;
         }
         let left = x
-            + LABEL
+            + roll_gutter(model)
             + ((note.start.max(first_tick) - first_tick) * width as u64 / shown_ticks) as i32;
         let right = x
-            + LABEL
+            + roll_gutter(model)
             + ((end.min(first_tick + shown_ticks) - first_tick) * width as u64 / shown_ticks)
                 as i32;
         let row = i32::from(model.high_key - note.key);
@@ -912,7 +857,6 @@ fn apply(
             Action::Stop
                 | Action::OutputChanged
                 | Action::View
-                | Action::SelectTrack
                 | Action::Lane(..)
                 | Action::ToggleEditor
         )
@@ -932,9 +876,9 @@ fn apply(
             if index < model.song.tracks.len() {
                 model.track = index;
                 model.selected = None;
+                model.fit_pitch();
                 if edit_notes {
                     model.track_view = false;
-                    model.fit_pitch();
                 }
             }
         }
@@ -1019,51 +963,46 @@ fn apply(
             model.track = model.track.min(model.song.tracks.len() - 1);
             model.selected = None;
         }
-        Action::SelectTrack => {
-            if let Some(index) = ui
-                .tracks
-                .value()
-                .checked_sub(1)
-                .and_then(|index| usize::try_from(index).ok())
-            {
-                if index < model.song.tracks.len() && model.track != index {
-                    model.track = index;
-                    model.selected = None;
-                    model.fit_pitch();
+        Action::Cell(index, col) => {
+            let track = &model.song.tracks[index];
+            let values = track_view::values(index, track);
+            let input = if col < 7 {
+                let Some(text) = dialog::input_default(track_view::HEADERS[col], &values[col])
+                else {
+                    return Ok(true);
+                };
+                text
+            } else {
+                String::new()
+            };
+            let value = if (2..=6).contains(&col) {
+                let n = input
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|_| "Enter a MIDI value.")?;
+                if n > 127 || (col == 2 && !(1..=16).contains(&n)) {
+                    return Err("Use channel 1–16 or a MIDI value from 0–127.".into());
                 }
-            }
-        }
-        Action::TrackSettings => {
-            let channel = number_value(&ui.channel, 1, 16)
-                .ok_or("MIDI channel must be between 1 and 16.")? as u8
-                - 1;
-            let patch =
-                number_value(&ui.patch, 0, 127).ok_or("Program must be between 0 and 127.")? as u8;
-            let bank =
-                number_value(&ui.bank, 0, 127).ok_or("Bank must be between 0 and 127.")? as u8;
-            let volume =
-                number_value(&ui.volume, 0, 127).ok_or("Volume must be between 0 and 127.")? as u8;
-            let pan = number_value(&ui.pan, 0, 127).ok_or("Pan must be between 0 and 127.")? as u8;
+                n
+            } else {
+                0
+            };
             model.checkpoint();
-            let track = &mut model.song.tracks[model.track];
-            let name = ui.name.value();
-            if name.trim() != track.name() && !name.trim().is_empty() {
-                track.rename(name.trim());
-            }
-            track.set_channel(channel);
-            for (cc, value) in [
-                (Some(0), bank),
-                (None, patch),
-                (Some(7), volume),
-                (Some(10), pan),
-            ] {
-                if track.setting(cc) != value {
-                    track.set_setting(cc, value);
-                }
-            }
-            track.mute = ui.mute.value();
-            track.solo = ui.solo.value();
+            model.track = index;
             model.selected = None;
+            let track = &mut model.song.tracks[index];
+            match col {
+                1 => track.rename(input.trim()),
+                2 => track.set_channel(value - 1),
+                3 => track.set_setting(None, value),
+                4 => track.set_setting(Some(0), value),
+                5 => track.set_setting(Some(7), value),
+                6 => track.set_setting(Some(10), value),
+                7 => track.mute = !track.mute,
+                8 => track.solo = !track.solo,
+                _ => {}
+            }
+            model.fit_pitch();
         }
         Action::Preset => {
             if let Some(&(bank, program)) = ui

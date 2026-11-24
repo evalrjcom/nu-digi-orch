@@ -1,7 +1,35 @@
 use super::*;
 
-pub(super) const GUTTER: i32 = 142;
-const LANE: i32 = 44;
+pub(super) const GUTTER: i32 = 388;
+const LANE: i32 = 24;
+
+const OFFSETS: [i32; 10] = [0, 29, 149, 181, 228, 271, 312, 350, 369, GUTTER];
+pub(super) const HEADERS: [&str; 9] = ["#", "Name", "Ch", "Prog", "Bank", "Vol", "Pan", "M", "S"];
+pub(super) fn values(i: usize, t: &song::Track) -> [String; 9] {
+    [
+        (i + 1).to_string(),
+        t.name(),
+        (t.channel + 1).to_string(),
+        t.setting(None).to_string(),
+        t.setting(Some(0)).to_string(),
+        t.setting(Some(7)).to_string(),
+        t.setting(Some(10)).to_string(),
+        if t.mute { "M" } else { "·" }.into(),
+        if t.solo { "S" } else { "·" }.into(),
+    ]
+}
+fn cells(x: i32, y: i32, labels: impl IntoIterator<Item = impl AsRef<str>>) {
+    for (i, label) in labels.into_iter().enumerate() {
+        draw::draw_text2(
+            label.as_ref(),
+            x + OFFSETS[i] + 2,
+            y,
+            OFFSETS[i + 1] - OFFSETS[i] - 2,
+            LANE,
+            Align::Inside | Align::Left | Align::Clip,
+        );
+    }
+}
 
 fn first_lane(frame: &Frame, model: &Model) -> usize {
     let rows = ((frame.h() - RULER) / LANE).max(1) as usize;
@@ -23,7 +51,15 @@ pub(super) fn handle(frame: &Frame, model: &Model, event: Event, tx: app::Sender
             if y >= 0 {
                 let index = first_lane(frame, model) + (y / LANE) as usize;
                 if index < model.song.tracks.len() {
-                    tx.send(Action::Lane(index, app::event_clicks()));
+                    let x = app::event_x() - frame.x();
+                    let col = OFFSETS
+                        .partition_point(|&offset| offset <= x)
+                        .saturating_sub(1);
+                    if (7..=8).contains(&col) || ((1..=6).contains(&col) && app::event_clicks()) {
+                        tx.send(Action::Cell(index, col));
+                    } else {
+                        tx.send(Action::Lane(index, app::event_clicks() && x >= GUTTER));
+                    }
                 }
             }
             true
@@ -45,14 +81,7 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
     draw::draw_rect_fill(x, y, w, h, PANEL);
     draw::set_font(Font::Helvetica, 12);
     draw::set_draw_color(SUBTLE);
-    draw::draw_text2(
-        "Track",
-        x + 7,
-        y,
-        GUTTER - 7,
-        RULER,
-        Align::Inside | Align::Left,
-    );
+    cells(x, y, HEADERS);
     let first = first_lane(frame, model);
     let visible = ((h - RULER + LANE - 1) / LANE) as usize;
     let solo = model.song.tracks.iter().any(|track| track.solo);
@@ -75,31 +104,7 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
         };
         draw::draw_rect_fill(x, top, w, LANE - 1, fill);
         draw::set_draw_color(TEXT);
-        let label = format!("{:02}  {}", index + 1, track.name());
-        draw::draw_text2(
-            &label,
-            x + 7,
-            top + 2,
-            GUTTER - 12,
-            20,
-            Align::Inside | Align::Left | Align::Clip,
-        );
-        draw::set_draw_color(SUBTLE);
-        let state = if track.mute {
-            "  Mute"
-        } else if track.solo {
-            "  Solo"
-        } else {
-            ""
-        };
-        draw::draw_text2(
-            &format!("Ch {}{}", track.channel + 1, state),
-            x + 8,
-            top + 22,
-            GUTTER - 12,
-            18,
-            Align::Inside | Align::Left,
-        );
+        cells(x, top, values(index, track));
         let ink = if track.mute || (solo && !track.solo) {
             SUBTLE
         } else {
