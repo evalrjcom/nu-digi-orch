@@ -310,6 +310,10 @@ struct Ui {
     arrangement: Frame,
     preset: fltk::browser::HoldBrowser,
     preset_window: Window,
+    piano_track: Choice,
+    track_choices: Vec<String>,
+    add_track: Button,
+    remove_track: Button,
     keyboard: keyboard::Keyboard,
     last_stop: Option<std::time::Instant>,
     presets: Vec<(i32, i32)>,
@@ -507,8 +511,17 @@ impl Ui {
         let font = flat_label(793, 682, 228, 29, "Choose an SF2 file", 12, SUBTLE);
 
         flat_label(16, 85, 37, 25, "View", 13, SUBTLE);
-        button(232, 83, 68, "+ Track", tx, Action::AddTrack);
-        button(306, 83, 32, "−", tx, Action::RemoveTrack).set_tooltip("Remove selected track");
+        let add_track = button(232, 83, 68, "+ Track", tx, Action::AddTrack);
+        let mut remove_track = button(306, 83, 32, "−", tx, Action::RemoveTrack);
+        remove_track.set_tooltip("Remove selected track");
+        let mut piano_track = Choice::new(232, 83, 106, 29, None);
+        piano_track.set_tooltip("Choose the track to edit in the piano roll");
+        piano_track.set_callback(move |choice| {
+            if let Ok(index) = usize::try_from(choice.value()) {
+                tx.send(Action::Lane(index, false));
+            }
+        });
+        piano_track.hide();
         button(
             16,
             633,
@@ -785,9 +798,10 @@ impl Ui {
             });
         }
         effects.end();
-        let preset_window = Window::new(130, 120, 590, 510, "SoundFont presets · Bank / Patch");
+        let mut preset_window = Window::new(130, 120, 590, 510, "SoundFont presets · Bank / Patch");
         let preset = fltk::browser::HoldBrowser::new(12, 12, 566, 442, None);
         preset_window.resizable(&preset);
+        preset_window.make_modal(true);
         button(12, 466, 150, "Apply to track", tx, Action::Preset);
         button(174, 466, 150, "Load SF2…", tx, Action::LoadFont);
         preset_window.end();
@@ -797,6 +811,10 @@ impl Ui {
             arrangement,
             preset,
             preset_window,
+            piano_track,
+            track_choices: Vec::new(),
+            add_track,
+            remove_track,
             keyboard: keyboard::Keyboard::new(tx),
             last_stop: None,
             presets: Vec::new(),
@@ -834,6 +852,15 @@ impl Ui {
         }
     }
 
+    fn preset_line(&self, track: &song::Track) -> i32 {
+        let bank = i32::from(track.setting(Some(0))) + if track.channel == 9 { 128 } else { 0 };
+        let program = i32::from(track.setting(None));
+        self.presets
+            .iter()
+            .position(|&(b, p)| b == bank && p == program)
+            .map_or(0, |i| i as i32 + 1)
+    }
+
     fn sync(&mut self, model: &mut Model) {
         let path = model
             .path
@@ -846,15 +873,32 @@ impl Ui {
             if model.dirty { "* " } else { "" },
             path
         ));
-        let track = &model.song.tracks[model.track];
-        let bank = i32::from(track.setting(Some(0))) + if track.channel == 9 { 128 } else { 0 };
-        let program = i32::from(track.setting(None));
-        self.preset.select(
-            self.presets
+        if model.track_view {
+            self.piano_track.hide();
+            self.add_track.show();
+            self.remove_track.show();
+        } else {
+            let choices: Vec<_> = model
+                .song
+                .tracks
                 .iter()
-                .position(|&(b, p)| b == bank && p == program)
-                .map_or(0, |i| i as i32 + 1),
-        );
+                .enumerate()
+                .map(|(index, track)| format!("{} {}", index + 1, menu_label(&track.name())))
+                .collect();
+            if choices != self.track_choices {
+                self.piano_track.clear();
+                for label in &choices {
+                    self.piano_track.add_choice(label);
+                }
+                self.track_choices = choices;
+            }
+            self.piano_track.set_value(model.track as i32);
+            self.add_track.hide();
+            self.remove_track.hide();
+            self.piano_track.show();
+        }
+        let track = &model.song.tracks[model.track];
+        self.preset.select(self.preset_line(track));
         self.bpm.set_value(&format!("{:.3}", model.song.bpm()));
         self.beat.set_value(&(model.view_beat + 1).to_string());
         self.pitch.set_value(&model.high_key.to_string());
@@ -1799,6 +1843,10 @@ fn apply(
             model.column = col;
             return apply(Action::Lane(index, false), ui, model, background);
         }
+        Action::Cell(index, 3) => {
+            apply(Action::Lane(index, false), ui, model, background)?;
+            return apply(Action::BrowsePresets, ui, model, background);
+        }
         Action::MixerValue(index, col, _)
         | Action::Cell(index, col)
         | Action::Step(index, col, _) => {
@@ -1878,6 +1926,11 @@ fn apply(
                     "SoundFont presets · {}",
                     model.song.tracks[model.track].name()
                 ));
+                let line = ui.preset_line(&model.song.tracks[model.track]);
+                ui.preset.select(line);
+                if line > 0 {
+                    ui.preset.middle_line(line);
+                }
                 ui.preset_window.show();
             }
         }
@@ -1909,8 +1962,10 @@ fn apply(
             {
                 let channel = model.song.tracks[model.track].channel;
                 if (bank >= 128) != (channel == 9) {
-                    ui.sync(model);
-                    return Err("For drum presets set track channel 10. Use another channel for melodic presets.".into());
+                    dialog::alert_default(
+                        "Use channel 10 for drum presets. Use another channel for melodic presets.",
+                    );
+                    return Ok(true);
                 }
                 model.save_undo();
                 let track = &mut model.song.tracks[model.track];
@@ -1925,6 +1980,7 @@ fn apply(
                     ],
                     false,
                 );
+                ui.preset_window.hide();
             }
         }
         Action::TempoStep(d) => {

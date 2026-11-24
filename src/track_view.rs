@@ -111,7 +111,8 @@ pub(super) fn handle(frame: &Frame, model: &Model, event: Event, tx: app::Sender
                             col,
                             if y % LANE < LANE / 2 { 1 } else { -1 },
                         ));
-                    } else if (7..=8).contains(&col)
+                    } else if col == 3
+                        || (7..=8).contains(&col)
                         || ((1..=6).contains(&col) && app::event_clicks())
                     {
                         tx.send(Action::Cell(index, col));

@@ -10,7 +10,7 @@ The composer opens in split view. The upper table combines track names, channel,
 
 Choose **Full track view** for the arrangement alone. Click a beat on either ruler to cue playback or jump while playing. Play and Loop start at the cue. Use the BPM up/down arrows or click the up/down controls beside channel, program, bank, volume, or pan. Select a numeric cell to adjust it with the keyboard arrow keys.
 
-Choose **Full piano roll** or double-click an arrangement lane to expand the piano roll across the editing area. **Split view** restores the table. Both panes share the same beat grid and playback position.
+Choose **Full piano roll** or double-click an arrangement lane to expand the piano roll across the editing area. Use the track selector beside **View** to switch tracks in Full Piano Roll. **Split view** restores the table. Both panes share the same beat grid and playback position.
 
 During playback and recording, the amber vertical line marks the current musical position in both views. It follows tempo changes, advances to the next 16-beat page, and returns to the cue during loop playback.
 
@@ -32,7 +32,7 @@ Choose **Track mixer** in the view selector. Each strip shows the track name, MI
 2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system default or a device selected in **Audio device**. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
 3. Press **Play** or activate **Loop** before playback. To send MIDI to hardware or another application, select its port in **Output**.
 4. Double-click a track lane to open its piano roll. Click the piano roll to add or select a note. Drag a note to move it in pitch and time. Right-click or press Delete with the roll focused to remove a note. The note fields below the roll set exact tick position, pitch, duration, and velocity. **Snap** controls the edit grid, and **New length** controls the duration of newly drawn notes.
-5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. Click **SoundFont presets…** to browse banks, patches, and names in the loaded SoundFont. Select a preset, then click **Apply to track**. External devices share patch and controller settings per MIDI channel. Mute and Solo control playback and WAV export for the current session.
+5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. Click a **Prog** value or **SoundFont presets…** to browse banks, patches, and names in the loaded SoundFont. Select a preset, then click **Apply to track**. External devices share patch and controller settings per MIDI channel. Mute and Solo control playback and WAV export for the current session.
 6. Pick a port in **MIDI input…** in the upper-right corner, beside the audio device selector, then press **Record MIDI**. The app captures a take from the start of the timeline. Play or monitor the instrument on your MIDI device during capture. **Stop** adds the take as a new editable track.
 7. Save a standard MIDI file, or use **File → Export WAV** to mix the audible tracks to a stereo 44.1 kHz, 16-bit WAV with the loaded SoundFont.
 
