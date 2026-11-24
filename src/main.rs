@@ -3,6 +3,7 @@
 mod audio;
 mod bus;
 mod effects;
+mod gm;
 mod mixer;
 mod recording;
 mod song;
@@ -1089,13 +1090,13 @@ fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
     });
 }
 
-fn mixer_message(channel: u8, controller: Option<u8>, value: u8) -> song::Packet {
+fn mixer_message(track: usize, channel: u8, controller: Option<u8>, value: u8) -> song::Packet {
     let (bytes, len) = match controller {
         Some(cc) => ([0xb0 | channel, cc, value], 3),
         None => ([0xc0 | channel, value, 0], 2),
     };
     song::Packet {
-        track: usize::MAX,
+        track,
         micros: 0,
         bytes,
         len,
@@ -1125,7 +1126,10 @@ fn apply(
             let bus = if i == usize::MAX {
                 &model.effects.1
             } else {
-                &model.song.tracks[i].bus
+                let Some(track) = model.song.tracks.get(i) else {
+                    return Ok(true);
+                };
+                &track.bus
             };
             let [b, t, g, _] = bus.get();
             let mut bass = b as i8 - 12;
@@ -1319,13 +1323,13 @@ fn apply(
             }
             let channel = track.channel;
             let messages = match col {
-                3 => vec![mixer_message(channel, None, value)],
+                3 => vec![mixer_message(index, channel, None, value)],
                 4 => vec![
-                    mixer_message(channel, Some(0), value),
-                    mixer_message(channel, None, track.setting(None)),
+                    mixer_message(index, channel, Some(0), value),
+                    mixer_message(index, channel, None, track.setting(None)),
                 ],
-                5 => vec![mixer_message(channel, Some(7), value)],
-                6 => vec![mixer_message(channel, Some(10), value)],
+                5 => vec![mixer_message(index, channel, Some(7), value)],
+                6 => vec![mixer_message(index, channel, Some(10), value)],
                 _ => Vec::new(),
             };
             if col != 1 {
@@ -1352,8 +1356,8 @@ fn apply(
                 live_edit(
                     model,
                     vec![
-                        mixer_message(channel, Some(0), (bank % 128) as u8),
-                        mixer_message(channel, None, program as u8),
+                        mixer_message(model.track, channel, Some(0), (bank % 128) as u8),
+                        mixer_message(model.track, channel, None, program as u8),
                     ],
                     false,
                 );
@@ -1702,6 +1706,10 @@ fn main() {
                 ui.status.set_label("Playback finished.");
             }
             ui.advance_playhead(&mut model, micros);
+            // Audio levels continue changing after the transport reaches the final tick.
+            if model.mixer {
+                ui.arrangement.redraw();
+            }
         }
     }
 }

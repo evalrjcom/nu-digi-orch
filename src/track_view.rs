@@ -1,11 +1,22 @@
 use super::*;
 
-pub(super) const GUTTER: i32 = 388;
+pub(super) const GUTTER: i32 = 561;
 const LANE: i32 = 29;
 
-const OFFSETS: [i32; 10] = [0, 29, 149, 181, 228, 271, 312, 350, 369, GUTTER];
-pub(super) const HEADERS: [&str; 9] = ["#", "Name", "Ch", "Prog", "Bank", "Vol", "Pan", "M", "S"];
-pub(super) fn values(i: usize, t: &song::Track) -> [String; 9] {
+const OFFSETS: [i32; 11] = [0, 29, 149, 181, 228, 271, 312, 350, 369, 388, GUTTER];
+pub(super) const HEADERS: [&str; 10] = [
+    "#",
+    "Name",
+    "Ch",
+    "Prog",
+    "Bank",
+    "Vol",
+    "Pan",
+    "M",
+    "S",
+    "Instrument",
+];
+pub(super) fn values(i: usize, t: &song::Track) -> [String; 10] {
     [
         (i + 1).to_string(),
         t.name(),
@@ -16,6 +27,7 @@ pub(super) fn values(i: usize, t: &song::Track) -> [String; 9] {
         t.setting(Some(10)).to_string(),
         if t.mute { "M" } else { "·" }.into(),
         if t.solo { "S" } else { "·" }.into(),
+        gm::instrument(t).into(),
     ]
 }
 fn cells(x: i32, y: i32, labels: impl IntoIterator<Item = impl AsRef<str>>) {

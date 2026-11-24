@@ -137,7 +137,16 @@ struct Renderer {
 }
 
 fn frames(micros: u64, rate: u32) -> u64 {
-    (u128::from(micros) * u128::from(rate) / 1_000_000) as u64
+    (u128::from(micros) * u128::from(rate) / 1_000_000).min(u128::from(u64::MAX)) as u64
+}
+
+// Playback and export share the release window so wet tails sound the same.
+fn render_end(release: u64, rate: u32, looping: bool, wet: bool) -> u64 {
+    release.saturating_add(if looping {
+        0
+    } else {
+        u64::from(rate) * if wet { 4 } else { 1 }
+    })
 }
 
 impl Renderer {
@@ -162,6 +171,7 @@ impl Renderer {
         }
         // A sub-sample loop still needs one frame to make progress in the callback.
         let release_frame = frames(timeline.duration, rate).max(1);
+        let end_frame = render_end(release_frame, rate, looping, levels.get() != [0; 3]);
         Ok(Self {
             rack: crate::effects::Rack::new(rate),
             levels,
@@ -172,7 +182,7 @@ impl Renderer {
             frame: 0,
             rate,
             release_frame,
-            end_frame: release_frame + if looping { 0 } else { u64::from(rate) },
+            end_frame,
             released: false,
             looping,
         })
@@ -180,14 +190,33 @@ impl Renderer {
 
     fn dispatch(stems: &mut [Stem], p: Packet) {
         let [status, a, b] = p.bytes.map(i32::from);
-        for stem in stems {
-            if !matches!(status & 0xf0, 0x80 | 0x90) || stem.track == p.track {
-                stem.synth
-                    .process_midi_message(status & 15, status & 0xf0, a, b);
+        let kind = status & 0xf0;
+        let target = stems.binary_search_by_key(&p.track, |stem| stem.track).ok();
+        // Notes and mixer parameters on an instrument track belong to its stem.
+        // Controller-only tracks still provide shared channel settings for imported MIDI.
+        let local =
+            matches!(kind, 0x80 | 0x90 | 0xc0) || (kind == 0xb0 && matches!(a, 0 | 7 | 10 | 32));
+        if let Some(index) = target.filter(|_| local) {
+            stems[index]
+                .synth
+                .process_midi_message(status & 15, kind, a, b);
+        } else if !matches!(kind, 0x80 | 0x90) {
+            for stem in stems {
+                stem.synth.process_midi_message(status & 15, kind, a, b);
             }
         }
     }
+
     fn render(&mut self, mut left: &mut [f32], mut right: &mut [f32]) {
+        // Capture live effect changes while the song is still playing.
+        if !self.released {
+            self.end_frame = render_end(
+                self.release_frame,
+                self.rate,
+                self.looping,
+                self.levels.get() != [0; 3],
+            );
+        }
         while !left.is_empty() {
             if self.looping && self.frame >= self.end_frame {
                 for stem in &mut self.stems {
@@ -210,6 +239,13 @@ impl Renderer {
             }
             if !self.looping && !self.released && self.frame >= self.release_frame {
                 for stem in &mut self.stems {
+                    // Clear held pedals before releasing voices at the end of the arrangement.
+                    for channel in 0..16 {
+                        for controller in [64, 66] {
+                            stem.synth
+                                .process_midi_message(channel, 0xb0, controller, 0);
+                        }
+                    }
                     stem.synth.note_off_all(false);
                 }
                 self.released = true;
@@ -305,12 +341,12 @@ impl Playback {
                             });
                             renderer.release_frame =
                                 frames(renderer.timeline.duration, renderer.rate).max(1);
-                            renderer.end_frame = renderer.release_frame
-                                + if renderer.looping {
-                                    0
-                                } else {
-                                    u64::from(renderer.rate)
-                                };
+                            renderer.end_frame = render_end(
+                                renderer.release_frame,
+                                renderer.rate,
+                                renderer.looping,
+                                renderer.levels.get() != [0; 3],
+                            );
                         }
                         let mut left = [0.0; 256];
                         let mut right = [0.0; 256];
@@ -474,11 +510,7 @@ pub fn export_wav(
     levels: Arc<crate::effects::Levels>,
 ) -> Result<()> {
     let rate = 44_100;
-    let wet = levels.get() != [0, 0, 0];
     let mut renderer = Renderer::new(font, timeline, rate, false, levels)?;
-    if wet {
-        renderer.end_frame += u64::from(rate) * 3;
-    }
     if renderer.end_frame > u64::from((u32::MAX - 64) / 4) {
         return Err("The arrangement is too long for a stereo 16-bit WAV file.".into());
     }
@@ -517,12 +549,21 @@ mod mix_tests {
     use crate::{effects::Levels, song::Song};
 
     #[test]
+    fn tail_matches_playback_and_export() {
+        assert_eq!(render_end(44_100, 44_100, false, false), 88_200);
+        assert_eq!(render_end(44_100, 44_100, false, true), 220_500);
+        assert_eq!(render_end(44_100, 44_100, true, true), 44_100);
+        assert_eq!(render_end(u64::MAX, 44_100, false, true), u64::MAX);
+    }
+
+    #[test]
     #[ignore = "requires an SF2 path in NU_DIGI_ORCH_SF2"]
     fn soundfont_stems_and_master_process_real_audio() {
         let font = load_font(Path::new(&std::env::var("NU_DIGI_ORCH_SF2").unwrap())).unwrap();
-        let song = Song::demo();
+        let mut song = Song::demo();
+        song.tracks[1].set_channel(0);
         let levels = Arc::new(Levels::default());
-        let render = || {
+        let render = |song: &Song| {
             let mut engine =
                 Renderer::new(&font, song.timeline(), 44100, false, levels.clone()).unwrap();
             let mut left = vec![0.; 44100];
@@ -530,13 +571,17 @@ mod mix_tests {
             engine.render(&mut left, &mut right);
             left
         };
-        let dry = render();
+        let dry = render(&song);
         assert!(song.tracks.iter().all(|track| track.bus.rms() > 0.));
         assert!(levels.1.rms() > 0.);
         song.tracks[1].bus.set(10, -6, 100);
-        let shaped = render();
+        let shaped = render(&song);
         assert!(dry.iter().zip(shaped).any(|(a, b)| (a - b).abs() > 0.001));
+        let piano_level = song.tracks[0].bus.rms();
+        song.tracks[1].set_setting(Some(7), 0);
+        render(&song);
+        assert_eq!(song.tracks[0].bus.rms(), piano_level);
         levels.1.set(0, 0, 0);
-        assert!(render().iter().all(|&sample| sample == 0.));
+        assert!(render(&song).iter().all(|&sample| sample == 0.));
     }
 }

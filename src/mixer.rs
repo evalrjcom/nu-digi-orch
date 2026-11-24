@@ -1,6 +1,6 @@
 use super::*;
 
-const STRIP: i32 = 120;
+const STRIP: i32 = 132;
 const CONTROL: Color = Color::from_rgb(54, 68, 86);
 
 fn page(f: &Frame, m: &Model) -> (usize, usize) {
@@ -77,14 +77,17 @@ pub(super) fn paint(f: &Frame, m: &Model) {
         );
         label(
             x,
-            y + 32,
+            y + 27,
             w,
-            21,
+            17,
             &format!("Ch {}   Pgm {}", t.channel + 1, t.setting(None)),
             SUBTLE,
         );
+        draw::set_font(Font::Helvetica, 11);
+        label(x, y + 43, w, 16, gm::instrument(t), TEXT);
+        draw::set_font(Font::Helvetica, 13);
         let pan = i32::from(t.setting(Some(10)));
-        label(x, y + 57, w, 21, &format!("Pan {pan}"), TEXT);
+        label(x, y + 60, w, 21, &format!("Pan {pan}"), TEXT);
         draw::draw_rect_fill(x + 12, y + 87, 92, 3, CONTROL);
         draw::draw_rect_fill(x + 10 + pan * 92 / 127, y + 80, 5, 16, ACCENT);
         let volume = i32::from(t.setting(Some(7)));
@@ -146,7 +149,7 @@ pub(super) fn handle(
     m: &Model,
     e: Event,
     tx: app::Sender<Action>,
-    drag: &mut Option<(usize, usize)>,
+    drag: &mut Option<(usize, usize, i32)>,
 ) -> bool {
     let (first, count) = page(f, m);
     let x = app::event_x() - f.x();
@@ -172,8 +175,11 @@ pub(super) fn handle(
                 return false;
             }
             let local = x % STRIP;
-            if !master && (bottom + 19..bottom + 47).contains(&y) && (5..111).contains(&local) {
-                tx.send(Action::Cell(i, if local < 59 { 7 } else { 8 }));
+            if !master
+                && (bottom + 19..bottom + 47).contains(&y)
+                && ((5..56).contains(&local) || (60..111).contains(&local))
+            {
+                tx.send(Action::Cell(i, if local < 56 { 7 } else { 8 }));
                 return true;
             }
             let col = if (105..133).contains(&y) {
@@ -190,17 +196,19 @@ pub(super) fn handle(
                 }
                 return true;
             };
-            *drag = Some((i, col));
+            // Preserve the strip origin if scrolling or resizing occurs during the gesture.
+            let origin = if master {
+                f.w() - STRIP
+            } else {
+                strip as i32 * STRIP
+            };
+            *drag = Some((i, col, origin));
         }
         Event::Drag if drag.is_some() => {}
         _ => return false,
     }
-    if let Some((i, col)) = *drag {
-        let local = if i == usize::MAX {
-            x - (f.w() - STRIP)
-        } else {
-            x - (i - first) as i32 * STRIP
-        };
+    if let Some((i, col, origin)) = *drag {
+        let local = x - origin;
         if col == 8 || col == 9 {
             tx.send(Action::BusValue(
                 i,

@@ -14,7 +14,7 @@ During playback and recording, the amber vertical line marks the current musical
 
 ## Track mixer
 
-Choose **Track mixer** in the view selector. Each strip shows the track name, MIDI channel and program. Drag the vertical volume fader or horizontal pan slider, and click Mute or Solo while playing. Scroll over the mixer to reach additional tracks. Volume and pan use standard MIDI values from 0 to 127, with pan centered at 64. Tracks routed to the same MIDI channel share its controller values during playback.
+Choose **Track mixer** in the view selector. Each strip shows the track name, MIDI channel and program. Drag the vertical volume fader or horizontal pan slider, and click Mute or Solo while playing. Scroll over the mixer to reach additional tracks. Volume and pan use standard MIDI values from 0 to 127, with pan centered at 64. SoundFont instrument tracks have independent volume, pan, bank, and program even when their MIDI channels match. External MIDI devices share these settings per channel.
 
 ## Start composing
 
@@ -22,7 +22,7 @@ Choose **Track mixer** in the view selector. Each strip shows the track name, MI
 2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system default or a device selected in **Audio device**. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
 3. Press **Play** or activate **Loop** before playback. To send MIDI to hardware or another application, select its port in **Output**.
 4. Double-click a track lane to open its piano roll. Click the piano roll to add or select a note. Drag a note to move it in pitch and time. Right-click or press Delete with the roll focused to remove a note. The note fields below the roll set exact tick position, pitch, duration, and velocity. **Snap** controls the edit grid, and **New length** controls the duration of newly drawn notes.
-5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. With an SF2 loaded, you can also choose a named preset. Tracks sharing a MIDI channel share its patch and controllers. Mute and Solo control playback and WAV export for the current session.
+5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. With an SF2 loaded, you can also choose a named preset. External devices share patch and controller settings per MIDI channel. Mute and Solo control playback and WAV export for the current session.
 6. Pick a port in **MIDI input…**, then press **Record MIDI**. The app captures a take from the start of the timeline. Play or monitor the instrument on your MIDI device during capture. **Stop** adds the take as a new editable track.
 7. Save a standard MIDI file, or use **File → Export WAV** to mix the audible tracks to a stereo 44.1 kHz, 16-bit WAV with the loaded SoundFont.
 
@@ -61,10 +61,12 @@ The project format is Standard MIDI File 0 or 1 with ticks-per-quarter timing. T
 
 ## SoundFont effects
 
-Open **Playback → SoundFont effects** to adjust the master reverb, chorus and stereo feedback delay during playback. Each slider runs from 0 to 100%. The settings apply to the software synth and GUI WAV exports for this session. WAV export captures the current settings and allows an extra three seconds for wet tails. External MIDI devices use their own audio processing.
+Open **Playback → SoundFont effects** to adjust the master reverb, chorus and stereo feedback delay during playback. Each slider runs from 0 to 100%. The settings apply to the software synth and GUI WAV exports for this session. Playback and WAV export allow four seconds of decay after the final MIDI event when effects are active, or one second otherwise. WAV export captures the current settings. External MIDI devices use their own audio processing.
 
 ### Mix and master controls
 
 In **Track mixer**, drag the Bass or Treble line left or right to cut or boost up to 12 dB around 200 Hz or 4 kHz. The fixed **Master** strip controls the combined SoundFont output after effects, with unity at 100% and silence at 0%. The level bars show stereo RMS with 300 ms averaging on a −60 to 0 dBFS scale. Track meters follow track EQ; the master meter follows master gain. External MIDI output has no audio return to meter.
 
 The **Mixer** menu offers track starting points (Flat, Vocal presence, Bass weight, Acoustic sparkle) and master EQ/gain starting points (Flat unity, Warm tape EQ, Gentle smile EQ, Bright clarity). Select a track before applying a track preset. Tone and master settings apply during the session and are captured by GUI WAV export; Standard MIDI files retain their usual MIDI controls.
+
+Track and mixer views show the instrument associated with each track’s initial MIDI patch. Patch numbers use the stored MIDI range (0–127), one lower than printed GM tables (1–128). Channel 10 displays Drum Kit. Nonzero banks display Bank Preset because their instrument names depend on the selected device or SoundFont.
