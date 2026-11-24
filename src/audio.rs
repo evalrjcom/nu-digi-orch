@@ -488,7 +488,10 @@ impl Playback {
                         let boundary = if update.reposition.is_some() {
                             elapsed
                         } else {
-                            timeline.packets.get(index).map_or(u64::MAX, |p| p.micros)
+                            timeline
+                                .packets
+                                .get(index)
+                                .map_or(elapsed, |p| p.micros.min(elapsed))
                         };
                         timeline = update.timeline;
                         index = timeline.packets.partition_point(|p| p.micros < boundary);

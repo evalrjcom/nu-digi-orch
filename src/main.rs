@@ -7,6 +7,7 @@ mod gm;
 mod keyboard;
 mod mixer;
 mod recording;
+mod rhythm;
 mod song;
 mod track_view;
 
@@ -84,6 +85,7 @@ enum Action {
     Record,
     RecordSelected,
     RecordBacking,
+    MetronomeChanged,
     Stop,
     OutputChanged,
     LoadFont,
@@ -113,7 +115,7 @@ struct Model {
     captured: Vec<(u64, [u8; 3])>,
     record_target: Option<usize>,
     record_offset: u64,
-    click: bool,
+    click: Option<rhythm::Pattern>,
     export_in_progress: bool,
     inputs: Vec<recording::InputPort>,
     view_beat: Tick,
@@ -165,7 +167,7 @@ impl Model {
             captured: Vec::new(),
             record_target: None,
             record_offset: 0,
-            click: false,
+            click: None,
             export_in_progress: false,
             inputs: Vec::new(),
             view_beat: 0,
@@ -283,6 +285,7 @@ struct Ui {
     font: Frame,
     looping: fltk::button::ToggleButton,
     metronome: fltk::button::ToggleButton,
+    rhythm: Choice,
     beat: IntInput,
     pitch: IntInput,
     snap: Choice,
@@ -547,7 +550,13 @@ impl Ui {
         midi_input.set_value(0);
         midi_input.set_tooltip("Choose a MIDI input, then press Record.");
         let mut metronome = fltk::button::ToggleButton::new(1030, 43, 116, 29, "Metronome");
-        metronome.set_tooltip("Enable the click before starting playback or recording.");
+        metronome.set_tooltip("Toggle the click or drum pattern, including during playback.");
+        metronome.emit(tx, Action::MetronomeChanged);
+        let mut rhythm = Choice::new(1049, 84, 115, 28, None);
+        rhythm.add_choice(rhythm::Pattern::LABELS);
+        rhythm.set_value(0);
+        rhythm.set_tooltip("Metronome sound or drum pattern");
+        rhythm.emit(tx, Action::MetronomeChanged);
         let mut record = button(114, 43, 45, "@circle", tx, Action::Record);
         record.set_label_color(Color::Red);
         record.set_tooltip("Start a new MIDI take. Press Stop to keep it.");
@@ -664,6 +673,7 @@ impl Ui {
             font,
             looping,
             metronome,
+            rhythm,
             beat,
             pitch,
             snap,
@@ -1115,12 +1125,16 @@ fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
     };
     let mut timeline = model.song.timeline();
     // Keep transport running through silent sections, including when all tracks are muted.
-    timeline.duration = timeline.duration.max(time_for(end_tick));
+    timeline.duration = timeline.duration.max(if rebuild {
+        time_for(end_tick)
+    } else {
+        model.duration_micros
+    });
     model.duration_micros = timeline.duration;
-    model.offset = time_for(model.cue).min(timeline.duration.saturating_sub(1));
-    if model.click {
-        add_click(&mut timeline, &model.song);
+    if rebuild {
+        model.offset = time_for(model.cue).min(timeline.duration.saturating_sub(1));
     }
+    rhythm::append(&mut timeline, &model.song, model.click);
     timeline.seek(model.offset);
     let position = time_for(tick)
         .saturating_sub(model.offset)
@@ -1160,36 +1174,6 @@ fn mixer_message(track: usize, channel: u8, controller: Option<u8>, value: u8) -
         bytes,
         len,
     }
-}
-
-// Insert an isolated GM woodblock stem into the playback timeline only.
-fn add_click(timeline: &mut song::Timeline, song: &Song) {
-    let track = timeline.buses.len();
-    timeline.buses.push(Arc::default());
-    timeline.instrument_tracks.push(track);
-    let clock = song.tempo_clock();
-    let beat_ticks = u64::from(song.ppq);
-    let beats = clock(timeline.duration) / beat_ticks;
-    for beat in 0..=beats.min(120_000) {
-        let time = tick_time(&clock, beat * beat_ticks, timeline.duration);
-        if time >= timeline.duration {
-            break;
-        }
-        let (key, velocity) = if beat % 4 == 0 { (76, 115) } else { (77, 90) };
-        timeline.packets.push(song::Packet {
-            track,
-            micros: time,
-            bytes: [0x99, key, velocity],
-            len: 3,
-        });
-        timeline.packets.push(song::Packet {
-            track,
-            micros: time.saturating_add(45_000).min(timeline.duration),
-            bytes: [0x89, key, 0],
-            len: 3,
-        });
-    }
-    timeline.packets.sort_by_key(|p| p.micros);
 }
 
 fn tick_time(clock: &dyn Fn(u64) -> Tick, tick: Tick, duration: u64) -> u64 {
@@ -1232,6 +1216,7 @@ fn apply(
             action,
             Action::Stop
                 | Action::RecordBacking
+                | Action::MetronomeChanged
                 | Action::OutputChanged
                 | Action::View
                 | Action::Lane(..)
@@ -1241,6 +1226,46 @@ fn apply(
         return Err("Press Stop to finish the MIDI take first.".into());
     }
     match action {
+        Action::MetronomeChanged => {
+            model.click = ui
+                .metronome
+                .value()
+                .then(|| rhythm::Pattern::ALL[ui.rhythm.value().clamp(0, 4) as usize]);
+            if let Some(playback) = model
+                .playback
+                .as_ref()
+                .filter(|p| !p.progress.done.load(Ordering::Relaxed))
+            {
+                // Only the isolated SoundFont stem gets immediate note-offs. On external MIDI,
+                // percussion shares channel 10 with the song's own drums.
+                let messages = if playback.is_software() {
+                    rhythm::NOTES
+                        .into_iter()
+                        .map(|key| song::Packet {
+                            track: model.song.tracks.len(),
+                            micros: 0,
+                            bytes: [0x89, key, 0],
+                            len: 3,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                live_edit(model, messages, false);
+            } else if model.recording.is_some() && model.click.is_some() {
+                let micros = model
+                    .record_offset
+                    .saturating_add(model.recording.as_ref().map_or(0, |take| take.elapsed()));
+                model.cue = model.song.tempo_clock()(micros);
+                model.jump_cue = Some(micros);
+                apply(Action::RecordBacking, ui, model, background)?;
+            }
+            ui.status.set_label(if model.click.is_some() {
+                "Metronome on"
+            } else {
+                "Metronome off"
+            });
+        }
         Action::TrackEffect(track, effect, amount) => {
             if let Some(track) = model.song.tracks.get(track) {
                 track.bus.set_effect(effect, amount);
@@ -1654,10 +1679,15 @@ fn apply(
                     .duration
                     .max(model.record_offset.saturating_add(3_600_000_000));
             }
-            model.click = ui.metronome.value();
-            if model.click {
-                add_click(&mut timeline, &model.song);
+            model.click = ui
+                .metronome
+                .value()
+                .then(|| rhythm::Pattern::ALL[ui.rhythm.value().clamp(0, 4) as usize]);
+            if model.click.is_some() && timeline.duration == 0 {
+                let clock = model.song.tempo_clock();
+                timeline.duration = tick_time(&clock, u64::from(model.song.ppq) * 16, u64::MAX);
             }
+            rhythm::append(&mut timeline, &model.song, model.click);
             if timeline.packets.is_empty() || timeline.duration == 0 {
                 return Err("Add notes to an audible track before playing.".into());
             }
