@@ -97,6 +97,8 @@ enum Action {
     CountIn(u8),
     CountSound(rhythm::Pattern),
     KeySignature,
+    KeyStep(i8),
+    TransposeStep(i8),
     Transpose,
     Stop,
     OutputChanged,
@@ -335,6 +337,8 @@ struct Ui {
     status: Frame,
     clock: Frame,
     chord: Frame,
+    key_signature: Frame,
+    transpose_amount: Frame,
     piano_dock: Button,
     time_scroll: fltk::valuator::Scrollbar,
     track_scroll: fltk::valuator::Scrollbar,
@@ -452,30 +456,55 @@ impl Ui {
         play.set_tooltip("Play");
         let looping = fltk::button::ToggleButton::new(165, 43, 68, 29, "Loop");
         let clock = flat_label(246, 43, 100, 29, "00:00.0", 17, ACCENT);
-        let mut chord = flat_label(344, 43, 125, 29, "—", 13, TEXT);
+        let mut chord = flat_label(344, 43, 68, 29, "—", 13, TEXT);
         chord.set_frame(FrameType::DownBox);
         chord.set_color(PANEL);
-        chord.set_tooltip("Chord and MIDI key signature at the playhead");
-        flat_label(480, 43, 40, 29, "BPM", 13, SUBTLE);
-        let mut bpm = Input::new(521, 43, 70, 30, None);
+        chord.set_tooltip("Chord at the playhead");
+        let mut key_signature = flat_label(419, 43, 99, 29, "Key —", 12, TEXT);
+        let mut transpose_amount = flat_label(547, 43, 92, 29, "Transpose 0", 12, TEXT);
+        for field in [&mut key_signature, &mut transpose_amount] {
+            field.set_frame(FrameType::DownBox);
+            field.set_color(PANEL);
+        }
+        for (x, change, hint) in [
+            (
+                519,
+                Action::KeyStep as fn(i8) -> Action,
+                "Key signature (circle of fifths)",
+            ),
+            (
+                640,
+                Action::TransposeStep as fn(i8) -> Action,
+                "Transpose by one semitone",
+            ),
+        ] {
+            for (y, symbol, step) in [(43, "@8>", 1), (58, "@2>", -1)] {
+                let mut arrow = fltk::button::Button::new(x, y, 20, 15, symbol);
+                arrow.set_label_size(9);
+                arrow.set_tooltip(hint);
+                arrow.emit(tx, change(step));
+            }
+        }
+        flat_label(665, 43, 34, 29, "BPM", 13, SUBTLE);
+        let mut bpm = Input::new(701, 43, 57, 30, None);
         bpm.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
         bpm.emit(tx, Action::Tempo);
         for (y, symbol, step, hint) in [
             (43, "@8>", 1, "Increase tempo by 1 BPM"),
             (58, "@2>", -1, "Decrease tempo by 1 BPM"),
         ] {
-            let mut arrow = fltk::button::RepeatButton::new(592, y, 25, 15, symbol);
+            let mut arrow = fltk::button::RepeatButton::new(759, y, 20, 15, symbol);
             arrow.set_label_size(9);
             arrow.set_tooltip(hint);
             arrow.emit(tx, Action::TempoStep(step));
         }
-        flat_label(625, 43, 53, 29, "Output", 13, SUBTLE);
-        let mut output = Choice::new(676, 43, 136, 29, None);
+        flat_label(785, 43, 43, 29, "Output", 13, SUBTLE);
+        let mut output = Choice::new(829, 43, 114, 29, None);
         output.add_choice("Software SoundFont");
         output.set_value(0);
         output.emit(tx, Action::OutputChanged);
-        button(821, 43, 92, "Load SF2…", tx, Action::LoadFont);
-        let font = flat_label(921, 43, 100, 29, "Choose an SF2 file", 12, SUBTLE);
+        button(950, 43, 76, "Load SF2…", tx, Action::LoadFont);
+        let font = flat_label(793, 682, 228, 29, "Choose an SF2 file", 12, SUBTLE);
 
         flat_label(16, 85, 37, 25, "View", 13, SUBTLE);
         button(232, 83, 68, "+ Track", tx, Action::AddTrack);
@@ -795,6 +824,8 @@ impl Ui {
             status,
             clock,
             chord,
+            key_signature,
+            transpose_amount,
             piano_dock,
             time_scroll,
             track_scroll,
@@ -980,13 +1011,23 @@ impl Ui {
                 || "—".to_owned(),
                 |chord| chord.label(key.is_some_and(|k| k.0 < 0)),
             );
-        let label = key.map_or_else(
-            || chord.clone(),
-            |key| format!("{chord} · {}", harmony::key_name(key)),
+        if self.chord.label() != chord {
+            self.chord.set_label(&chord);
+            self.chord.set_tooltip(&chord);
+        }
+        let signature = key.map_or_else(
+            || "Key —".to_owned(),
+            |key| format!("Key {}", harmony::key_name(key)),
         );
-        if self.chord.label() != label {
-            self.chord.set_label(&label);
-            self.chord.set_tooltip(&label);
+        if self.key_signature.label() != signature {
+            self.key_signature.set_label(&signature);
+            self.key_signature.set_tooltip(&signature);
+        }
+        let amount = format!("Transpose {:+}", model.song.transposed);
+        if self.transpose_amount.label() != amount {
+            self.transpose_amount.set_label(&amount);
+            self.transpose_amount
+                .set_tooltip("Cumulative semitone shift since open or new song");
         }
         let dock = if self.keyboard.docked() {
             if model.recording.is_some() {
@@ -1477,6 +1518,18 @@ fn apply(
             model.count_sound = sound;
             ui.status.set_label(&format!("Count-in sound: {sound:?}"));
         }
+        Action::KeyStep(step) => {
+            let (accidentals, minor) = model
+                .keys
+                .iter()
+                .rfind(|&&(tick, _)| tick <= model.playhead)
+                .map_or((0, false), |entry| entry.1);
+            let next = accidentals.saturating_add(step).clamp(-7, 7);
+            if next != accidentals {
+                model.checkpoint();
+                model.song.set_key(model.playhead, (next, minor));
+            }
+        }
         Action::KeySignature => {
             let current = model
                 .song
@@ -1509,20 +1562,25 @@ fn apply(
                 model.song.set_key(model.playhead, (index as i8 - 7, minor));
             }
         }
-        Action::Transpose => {
-            if let Some(value) = dialog::input_default("Transpose song by semitones", "0") {
-                let shift: i8 = value
+        Action::Transpose | Action::TransposeStep(_) => {
+            let shift = if let Action::TransposeStep(step) = action {
+                step
+            } else {
+                let Some(value) = dialog::input_default("Transpose song by semitones", "0") else {
+                    return Ok(true);
+                };
+                value
                     .trim()
                     .parse()
-                    .map_err(|_| "Enter a signed semitone count.")?;
-                if shift != 0 {
-                    let mut revised = model.song.clone();
-                    revised.transpose(shift)?;
-                    model.checkpoint();
-                    model.song = revised;
-                    model.selected = None;
-                    model.fit_pitch();
-                }
+                    .map_err(|_| "Enter a signed semitone count.")?
+            };
+            if shift != 0 {
+                let mut revised = model.song.clone();
+                revised.transpose(shift)?;
+                model.checkpoint();
+                model.song = revised;
+                model.selected = None;
+                model.fit_pitch();
             }
         }
         Action::MetronomeChanged => {

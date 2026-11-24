@@ -100,7 +100,7 @@ Choose **Playback → Count-in** for zero, one, or two bars before recording. Ch
 
 Click **Dock** on the virtual piano to hide it. The main window’s piano button shows whether the piano is docked during playback or recording. Click that button to bring the piano back. Existing hardware MIDI capture continues when the piano is docked.
 
-The box beside the clock displays a recognized chord and the explicit MIDI key signature at the playhead. Chords come from overlapping notes on audible melodic tracks. Use **Edit → Set key signature** at the playhead to save a major or minor key change, or **Edit → Transpose song** to shift all melodic notes and key signatures by a signed number of semitones. General MIDI drums keep their original pitches.
+The boxes beside the clock show the recognized chord, MIDI key signature at the playhead, and cumulative transposition in semitones since opening the file. Use the Key arrows to add or remove one sharp at the playhead, preserving major or minor mode. The Transpose arrows shift the song by one semitone. Chords come from overlapping notes on audible melodic tracks. Use **Edit → Set key signature** at the playhead to save a major or minor key change, or **Edit → Transpose song** to shift all melodic notes and key signatures by a signed number of semitones. General MIDI drums keep their original pitches.
 
 
 ## Scrollbars and chord ruler

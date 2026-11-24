@@ -70,6 +70,7 @@ pub struct Track {
 }
 #[derive(Clone)]
 pub struct Song {
+    pub transposed: i32,
     pub ppq: u16,
     pub tracks: Vec<Track>,
 }
@@ -392,6 +393,7 @@ impl Track {
 impl Song {
     pub fn new() -> Self {
         let mut song = Self {
+            transposed: 0,
             ppq: 480,
             tracks: Vec::new(),
         };
@@ -625,6 +627,7 @@ impl Song {
                 _ => {}
             }
         }
+        self.transposed = self.transposed.saturating_add(i32::from(semitones));
         Ok(())
     }
 
@@ -790,6 +793,7 @@ impl Song {
             track.inherited = Some((track.channel, settings));
         }
         Ok(Self {
+            transposed: 0,
             ppq: ppq.as_int(),
             tracks,
         })
@@ -928,6 +932,7 @@ mod tests {
         song.tracks[1].add_note(0, 480, 36, 80);
         song.set_key(0, (0, false));
         song.transpose(2).unwrap();
+        assert_eq!(song.transposed, 2);
         assert_eq!(song.tracks[0].notes()[0].key, 62);
         assert_eq!(song.tracks[1].notes()[0].key, 36);
         assert_eq!(
@@ -935,6 +940,7 @@ mod tests {
             vec![(0, (2, false))]
         );
         assert!(song.transpose(100).is_err());
+        assert_eq!(song.transposed, 2);
         assert_eq!(song.tracks[0].notes()[0].key, 62);
     }
 
