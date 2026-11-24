@@ -78,6 +78,7 @@ pub fn load_font(path: &Path) -> Result<Arc<SoundFont>> {
 pub struct Progress {
     pub position: AtomicU64,
     pub done: AtomicBool,
+    pub paused: AtomicBool,
 }
 
 enum Backend {
@@ -324,6 +325,11 @@ impl Playback {
                 device.build_output_stream(
                     &stream_config,
                     move |out: &mut [$sample], _| {
+                        if state.paused.load(Ordering::Acquire) {
+                            // Keep the synth, effect history, and sample position frozen.
+                            out.fill(<$sample as cpal::Sample>::from_sample(0.0_f32));
+                            return;
+                        }
                         for update in updates.try_iter() {
                             if let Some(micros) = update.reposition {
                                 for stem in &mut renderer.stems {

@@ -397,7 +397,7 @@ impl Ui {
         );
         menu.add(
             "Playback/Play or pause",
-            Shortcut::from_char(' '),
+            Shortcut::None,
             MenuFlag::Normal,
             move |_| tx.send(Action::TogglePlayback),
         );
@@ -1389,7 +1389,19 @@ fn apply(
             }
         }
         Action::TogglePlayback => {
-            if model.playback.is_some() {
+            if let Some(playback) = model
+                .playback
+                .as_ref()
+                .filter(|p| p.is_software() && !p.progress.done.load(Ordering::Relaxed))
+            {
+                let was_paused = playback.progress.paused.fetch_xor(true, Ordering::AcqRel);
+                ui.status
+                    .set_label(if was_paused { "Playing" } else { "Paused" });
+            } else if model
+                .playback
+                .as_ref()
+                .is_some_and(|p| !p.progress.done.load(Ordering::Relaxed))
+            {
                 halt_playback(model);
                 ui.status.set_label("Paused");
             } else {
@@ -1476,6 +1488,12 @@ fn apply(
         }
         Action::Play => {
             ui.last_stop = None;
+            if let Some(playback) = &model.playback {
+                if playback.progress.paused.swap(false, Ordering::AcqRel) {
+                    ui.status.set_label("Playing");
+                    return Ok(true);
+                }
+            }
             let mut timeline = model.song.timeline();
             if timeline.packets.is_empty() || timeline.duration == 0 {
                 return Err("Add notes to an audible track before playing.".into());
@@ -1690,6 +1708,74 @@ fn update_note(model: &mut Model, original: Note, changed: Note) -> song::Result
     Ok(())
 }
 
+struct SpaceShortcut {
+    window: usize,
+    text_fields: [usize; 7],
+    sender: app::Sender<Action>,
+    held: bool,
+}
+
+thread_local! {
+    static SPACE_SHORTCUT: RefCell<Option<SpaceShortcut>> = const { RefCell::new(None) };
+}
+
+fn install_space_shortcut(ui: &Ui, sender: app::Sender<Action>) {
+    SPACE_SHORTCUT.with(|slot| {
+        *slot.borrow_mut() = Some(SpaceShortcut {
+            window: ui.win.as_widget_ptr() as usize,
+            text_fields: [
+                ui.bpm.as_widget_ptr(),
+                ui.beat.as_widget_ptr(),
+                ui.pitch.as_widget_ptr(),
+                ui.start.as_widget_ptr(),
+                ui.key.as_widget_ptr(),
+                ui.duration.as_widget_ptr(),
+                ui.velocity.as_widget_ptr(),
+            ]
+            .map(|ptr| ptr as usize),
+            sender,
+            held: false,
+        });
+    });
+    // Intercept transport Space before FLTK sends it to the focused button.
+    // Forward all other events with the original window pointer supplied by FLTK.
+    unsafe {
+        app::event_dispatch(|event, window| {
+            let consumed = SPACE_SHORTCUT.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let Some(shortcut) = slot.as_mut() else {
+                    return false;
+                };
+                if event == Event::KeyUp && app::event_key() == Key::from_char(' ') {
+                    return std::mem::take(&mut shortcut.held);
+                }
+                if window as usize != shortcut.window {
+                    return false;
+                }
+                if event == Event::Unfocus {
+                    shortcut.held = false;
+                }
+                let modified =
+                    app::event_state().intersects(Shortcut::Ctrl | Shortcut::Alt | Shortcut::Meta);
+                if event != Event::KeyDown || app::event_key() != Key::from_char(' ') || modified {
+                    return false;
+                }
+                if app::focus()
+                    .is_some_and(|w| shortcut.text_fields.contains(&(w.as_widget_ptr() as usize)))
+                {
+                    return false;
+                }
+                if !shortcut.held {
+                    shortcut.held = true;
+                    shortcut.sender.send(Action::TogglePlayback);
+                }
+                true
+            });
+            consumed || app::handle_raw(event, window)
+        });
+    }
+}
+
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if arguments
@@ -1724,6 +1810,7 @@ fn main() {
         }
         ui.sync(&mut model);
     }
+    install_space_shortcut(&ui, send);
     ui.win.show();
     while ui.win.shown() {
         let _ = app::wait_for(0.05);
