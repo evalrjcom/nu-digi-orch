@@ -64,6 +64,7 @@ enum Action {
     Preset,
     BrowsePresets,
     TogglePlayback,
+    Jump(i8),
     Tempo,
     View,
     ToggleEditor,
@@ -113,6 +114,7 @@ struct Model {
     tracks_only: bool,
     column: usize,
     cue: Tick,
+    jump_cue: Option<u64>,
     offset: u64,
     lanes: Vec<Vec<Note>>,
     playhead: Tick,
@@ -134,6 +136,7 @@ impl Model {
             tracks_only: false,
             column: 2,
             cue: 0,
+            jump_cue: None,
             offset: 0,
             lanes: vec![],
             playhead: 0,
@@ -187,6 +190,7 @@ impl Model {
     fn replace(&mut self, song: Song, path: Option<PathBuf>, dirty: bool) {
         self.playback = None;
         self.cue = 0;
+        self.jump_cue = None;
         self.playhead = 0;
         self.song = song;
         self.path = path;
@@ -1128,8 +1132,23 @@ fn mixer_message(track: usize, channel: u8, controller: Option<u8>, value: u8) -
     }
 }
 
+fn tick_time(clock: &dyn Fn(u64) -> Tick, tick: Tick, duration: u64) -> u64 {
+    let mut low = 0;
+    let mut high = duration;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if clock(mid) < tick {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
 fn halt_playback(model: &mut Model) {
     if let Some(playback) = model.playback.take() {
+        model.jump_cue = None;
         let elapsed = playback.progress.position.load(Ordering::Relaxed);
         let position = model.offset.saturating_add(elapsed);
         // A cursor in the release tail resumes from the opening cue.
@@ -1478,9 +1497,61 @@ fn apply(
             model.playback = None;
             ui.refresh_outputs(model);
         }
+        Action::Jump(direction) => {
+            let duration = model.song.timeline().duration;
+            let clock = model.song.tempo_clock();
+            let playback = model.playback.take();
+            let running = playback.as_ref().is_some_and(|p| {
+                !p.progress.paused.load(Ordering::Acquire)
+                    && !p.progress.done.load(Ordering::Relaxed)
+            });
+            let position = playback
+                .as_ref()
+                .map_or_else(
+                    || {
+                        model
+                            .jump_cue
+                            .filter(|&time| clock(time) == model.playhead)
+                            .unwrap_or_else(|| tick_time(&clock, model.playhead, duration))
+                    },
+                    |p| {
+                        model
+                            .offset
+                            .saturating_add(p.progress.position.load(Ordering::Relaxed))
+                    },
+                )
+                .min(duration);
+            // Close the old stream or MIDI connection before opening a replacement.
+            drop(playback);
+            let target = position
+                .saturating_add_signed(i64::from(direction) * 5_000_000)
+                .min(duration);
+            model.cue = clock(target);
+            model.jump_cue = Some(target);
+            model.playhead = model.cue;
+            let beat = model.cue / u64::from(model.song.ppq);
+            if beat < model.view_beat || beat >= model.view_beat.saturating_add(BEATS) {
+                model.view_beat = beat / BEATS * BEATS;
+            }
+            let tenths = target / 100_000;
+            ui.clock.set_label(&format!(
+                "{:02}:{:02}.{}",
+                tenths / 600,
+                tenths / 10 % 60,
+                tenths % 10
+            ));
+            ui.last_stop = None;
+            if running && target < duration {
+                return apply(Action::Play, ui, model, background);
+            }
+            if running {
+                ui.status.set_label("Playback finished.");
+            }
+        }
         Action::Seek(tick) => {
             let playing = model.playback.take().is_some();
             model.cue = tick;
+            model.jump_cue = None;
             model.playhead = tick;
             if playing {
                 return apply(Action::Play, ui, model, background);
@@ -1501,16 +1572,10 @@ fn apply(
             model.playback = None;
             model.tick_at_time = Box::new(model.song.tempo_clock());
             model.duration_micros = timeline.duration;
-            let mut low = 0;
-            let mut high = timeline.duration;
-            while low < high {
-                let mid = low + (high - low) / 2;
-                if (model.tick_at_time)(mid) < model.cue {
-                    low = mid + 1;
-                } else {
-                    high = mid;
-                }
-            }
+            let low = model
+                .jump_cue
+                .filter(|&time| (model.tick_at_time)(time) == model.cue)
+                .unwrap_or_else(|| tick_time(&model.tick_at_time, model.cue, timeline.duration));
             if low >= timeline.duration {
                 return Err("Choose a beat before the end of the song.".into());
             }
@@ -1568,6 +1633,7 @@ fn apply(
                 model.playback = None;
                 model.playhead = 0;
                 model.cue = 0;
+                model.jump_cue = None;
                 model.view_beat = 0;
                 ui.clock.set_label("00:00.0");
             } else {
@@ -1754,6 +1820,21 @@ fn install_space_shortcut(ui: &Ui, sender: app::Sender<Action>) {
                 }
                 if event == Event::Unfocus {
                     shortcut.held = false;
+                }
+                let modifiers = app::event_state();
+                if event == Event::KeyDown
+                    && modifiers.contains(Shortcut::Ctrl)
+                    && !modifiers.intersects(Shortcut::Alt | Shortcut::Meta | Shortcut::Shift)
+                {
+                    let direction = match app::event_key() {
+                        Key::Left => -1,
+                        Key::Right => 1,
+                        _ => 0,
+                    };
+                    if direction != 0 {
+                        shortcut.sender.send(Action::Jump(direction));
+                        return true;
+                    }
                 }
                 let modified =
                     app::event_state().intersects(Shortcut::Ctrl | Shortcut::Alt | Shortcut::Meta);
