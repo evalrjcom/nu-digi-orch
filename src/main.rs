@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod bus;
 mod effects;
 mod mixer;
 mod recording;
@@ -63,6 +64,8 @@ enum Action {
     Tempo,
     View,
     ToggleEditor,
+    BusValue(usize, usize, i16),
+    MixPreset(bool, i8, i8, u8),
     Effects,
     MixerValue(usize, usize, u8),
     Seek(Tick),
@@ -301,6 +304,46 @@ impl Ui {
             ("Edit/Quantize Selected Note", None, Action::SnapNote),
             ("Track/Add Track", None, Action::AddTrack),
             ("Track/Remove Track", None, Action::RemoveTrack),
+            (
+                "Mixer/Track presets/Flat",
+                None,
+                Action::MixPreset(false, 0, 0, 100),
+            ),
+            (
+                "Mixer/Track presets/Vocal presence",
+                None,
+                Action::MixPreset(false, -3, 3, 100),
+            ),
+            (
+                "Mixer/Track presets/Bass weight",
+                None,
+                Action::MixPreset(false, 4, -2, 100),
+            ),
+            (
+                "Mixer/Track presets/Acoustic sparkle",
+                None,
+                Action::MixPreset(false, -2, 4, 100),
+            ),
+            (
+                "Mixer/Master presets/Flat unity",
+                None,
+                Action::MixPreset(true, 0, 0, 100),
+            ),
+            (
+                "Mixer/Master presets/Warm tape EQ",
+                None,
+                Action::MixPreset(true, 2, -2, 90),
+            ),
+            (
+                "Mixer/Master presets/Gentle smile EQ",
+                None,
+                Action::MixPreset(true, 2, 2, 80),
+            ),
+            (
+                "Mixer/Master presets/Bright clarity",
+                None,
+                Action::MixPreset(true, -1, 2, 85),
+            ),
             ("Playback/SoundFont effects…", None, Action::Effects),
             ("Playback/Load SoundFont…", None, Action::LoadFont),
             ("Playback/Refresh Devices", None, Action::Refresh),
@@ -1025,6 +1068,8 @@ fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
     let mut messages = messages;
     if rebuild && position > 0 {
         let mut chase = song::Timeline {
+            instrument_tracks: vec![],
+            buses: timeline.buses.clone(),
             packets: timeline
                 .packets
                 .iter()
@@ -1050,6 +1095,7 @@ fn mixer_message(channel: u8, controller: Option<u8>, value: u8) -> song::Packet
         None => ([0xc0 | channel, value, 0], 2),
     };
     song::Packet {
+        track: usize::MAX,
         micros: 0,
         bytes,
         len,
@@ -1075,6 +1121,31 @@ fn apply(
         return Err("Press Stop to finish the MIDI take first.".into());
     }
     match action {
+        Action::BusValue(i, col, v) => {
+            let bus = if i == usize::MAX {
+                &model.effects.1
+            } else {
+                &model.song.tracks[i].bus
+            };
+            let [b, t, g, _] = bus.get();
+            let mut bass = b as i8 - 12;
+            let mut treble = t as i8 - 12;
+            let mut gain = g;
+            match col {
+                8 => bass = v as i8,
+                9 => treble = v as i8,
+                _ => gain = v as u8,
+            }
+            bus.set(bass, treble, gain);
+        }
+        Action::MixPreset(master, bass, treble, gain) => {
+            let bus = if master {
+                &model.effects.1
+            } else {
+                &model.song.tracks[model.track].bus
+            };
+            bus.set(bass, treble, gain);
+        }
         Action::Effects => {
             ui.effects.show();
         }
@@ -1153,7 +1224,12 @@ fn apply(
             );
             if let Some(path) = browse_save("Export WAV", "Wave audio\t*.wav", "wav") {
                 let levels = Arc::new(model.effects.snapshot());
-                let timeline = model.song.timeline();
+                let mut timeline = model.song.timeline();
+                timeline.buses = timeline
+                    .buses
+                    .iter()
+                    .map(|b| Arc::new(b.snapshot()))
+                    .collect();
                 let background = background.clone();
                 std::thread::Builder::new()
                     .name("wav-export".into())

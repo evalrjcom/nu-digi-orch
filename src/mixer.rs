@@ -4,7 +4,7 @@ const STRIP: i32 = 120;
 const CONTROL: Color = Color::from_rgb(54, 68, 86);
 
 fn page(f: &Frame, m: &Model) -> (usize, usize) {
-    let count = (f.w() / STRIP).max(1) as usize;
+    let count = (f.w() / STRIP - 1).max(1) as usize;
     (m.track / count * count, count)
 }
 
@@ -17,6 +17,39 @@ fn label(x: i32, y: i32, w: i32, h: i32, text: &str, color: Color) {
         w,
         h,
         Align::Inside | Align::Center | Align::Clip,
+    );
+}
+
+fn eq_meter(x: i32, y: i32, bottom: i32, bus: &crate::bus::Bus, playing: bool) {
+    let [bass, treble, _, _] = bus.get();
+    for (row, (name, v)) in [("Bass", bass), ("Treble", treble)].into_iter().enumerate() {
+        let top = y + 105 + row as i32 * 28;
+        label(
+            x + 2,
+            top,
+            112,
+            18,
+            &format!("{name} {:+} dB", v as i16 - 12),
+            SUBTLE,
+        );
+        draw::draw_rect_fill(x + 12, top + 20, 92, 2, CONTROL);
+        draw::draw_rect_fill(x + 10 + i32::from(v) * 92 / 24, top + 17, 5, 8, ACCENT);
+    }
+    let top = y + 190;
+    let db = if playing {
+        20. * bus.rms().max(0.001).log10()
+    } else {
+        -60.
+    };
+    let level = ((db + 60.) / 60.).clamp(0., 1.);
+    draw::draw_rect_fill(x + 89, top, 9, bottom - top, CONTROL);
+    let pixels = ((bottom - top) as f32 * level) as i32;
+    draw::draw_rect_fill(
+        x + 89,
+        bottom - pixels,
+        9,
+        pixels,
+        if db >= 0. { Color::Red } else { ACCENT },
     );
 }
 
@@ -55,8 +88,15 @@ pub(super) fn paint(f: &Frame, m: &Model) {
         draw::draw_rect_fill(x + 12, y + 87, 92, 3, CONTROL);
         draw::draw_rect_fill(x + 10 + pan * 92 / 127, y + 80, 5, 16, ACCENT);
         let volume = i32::from(t.setting(Some(7)));
-        label(x, y + 108, w, 24, &format!("Volume {volume}"), TEXT);
-        let top = y + 147;
+        eq_meter(
+            x,
+            y,
+            bottom,
+            &t.bus,
+            m.playback.as_ref().is_some_and(|p| p.is_software()),
+        );
+        label(x, y + 163, w, 24, &format!("Volume {volume}"), TEXT);
+        let top = y + 190;
         let knob = bottom - volume * (bottom - top) / 127;
         draw::draw_rect_fill(x + 55, top, 6, bottom - top + 1, CONTROL);
         draw::draw_rect_fill(x + 55, knob, 6, bottom - knob + 1, ACCENT);
@@ -79,6 +119,24 @@ pub(super) fn paint(f: &Frame, m: &Model) {
             );
         }
     }
+    let x = f.x() + f.w() - STRIP;
+    let y = f.y();
+    draw::draw_rect_fill(x, y, STRIP - 4, f.h(), PANEL);
+    label(x, y + 9, STRIP - 4, 26, "MASTER", ACCENT);
+    label(x, y + 34, STRIP - 4, 20, "SoundFont", SUBTLE);
+    eq_meter(
+        x,
+        y,
+        bottom,
+        &m.effects.1,
+        m.playback.as_ref().is_some_and(|p| p.is_software()),
+    );
+    let gain = i32::from(m.effects.1.get()[2]);
+    label(x, y + 163, STRIP - 4, 24, &format!("Gain {gain}%"), TEXT);
+    let top = y + 190;
+    let knob = bottom - gain * (bottom - top) / 127;
+    draw::draw_rect_fill(x + 55, top, 6, bottom - top, CONTROL);
+    draw::draw_rect_fill(x + 39, knob - 4, 38, 9, ACCENT);
     draw::pop_clip();
 }
 
@@ -108,21 +166,28 @@ pub(super) fn handle(
         }
         Event::Push if app::event_mouse_button() == MouseButton::Left && x >= 0 => {
             let strip = x as usize / STRIP as usize;
-            let i = first + strip;
-            if strip >= count || i >= m.song.tracks.len() {
+            let master = x >= f.w() - STRIP;
+            let i = if master { usize::MAX } else { first + strip };
+            if !master && (strip >= count || i >= m.song.tracks.len()) {
                 return false;
             }
             let local = x % STRIP;
-            if (bottom + 19..bottom + 47).contains(&y) && (5..111).contains(&local) {
+            if !master && (bottom + 19..bottom + 47).contains(&y) && (5..111).contains(&local) {
                 tx.send(Action::Cell(i, if local < 59 { 7 } else { 8 }));
                 return true;
             }
-            let col = if (73..103).contains(&y) {
+            let col = if (105..133).contains(&y) {
+                8
+            } else if (133..161).contains(&y) {
+                9
+            } else if !master && (73..103).contains(&y) {
                 6
-            } else if (139..=bottom + 6).contains(&y) {
+            } else if (183..=bottom + 6).contains(&y) {
                 5
             } else {
-                tx.send(Action::Lane(i, false));
+                if !master {
+                    tx.send(Action::Lane(i, false));
+                }
                 return true;
             };
             *drag = Some((i, col));
@@ -131,13 +196,29 @@ pub(super) fn handle(
         _ => return false,
     }
     if let Some((i, col)) = *drag {
-        let value = if col == 5 {
-            127 * (bottom - y).clamp(0, bottom - 147) / (bottom - 147)
+        let local = if i == usize::MAX {
+            x - (f.w() - STRIP)
         } else {
-            let local = x - (i - first) as i32 * STRIP;
+            x - (i - first) as i32 * STRIP
+        };
+        if col == 8 || col == 9 {
+            tx.send(Action::BusValue(
+                i,
+                col,
+                (24 * (local - 12).clamp(0, 92) / 92 - 12) as i16,
+            ));
+            return true;
+        }
+        let value = if col == 5 {
+            127 * (bottom - y).clamp(0, bottom - 190) / (bottom - 190)
+        } else {
             127 * (local - 12).clamp(0, 92) / 92
         };
-        tx.send(Action::MixerValue(i, col, value as u8));
+        if i == usize::MAX {
+            tx.send(Action::BusValue(i, col, value as i16));
+        } else {
+            tx.send(Action::MixerValue(i, col, value as u8));
+        }
     }
     true
 }

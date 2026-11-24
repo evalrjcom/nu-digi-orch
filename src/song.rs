@@ -60,6 +60,7 @@ impl Event {
 
 #[derive(Clone, Default)]
 pub struct Track {
+    pub bus: std::sync::Arc<crate::bus::Bus>,
     events: Vec<(Tick, Event)>,
     end: Tick,
     pub mute: bool,
@@ -85,11 +86,14 @@ pub struct Note {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Packet {
+    pub track: usize,
     pub micros: u64,
     pub bytes: [u8; 3],
     pub len: usize,
 }
 pub struct Timeline {
+    pub instrument_tracks: Vec<usize>,
+    pub buses: Vec<std::sync::Arc<crate::bus::Bus>>,
     pub packets: Vec<Packet>,
     pub duration: u64,
 }
@@ -101,7 +105,7 @@ impl Timeline {
         if offset == 0 {
             return;
         }
-        let mut notes = [[0u8; 128]; 16];
+        let mut notes = std::collections::BTreeMap::new();
         let mut events = Vec::new();
         for mut event in self
             .packets
@@ -110,25 +114,32 @@ impl Timeline {
             let [status, key, value] = event.bytes;
             let channel = usize::from(status & 15);
             match status & 0xf0 {
-                0x80 => notes[channel][usize::from(key)] = 0,
-                0x90 => notes[channel][usize::from(key)] = value,
+                0x80 => {
+                    notes.remove(&(event.track, channel, key));
+                }
+                0x90 => {
+                    if value > 0 {
+                        notes.insert((event.track, channel, key), value);
+                    } else {
+                        notes.remove(&(event.track, channel, key));
+                    }
+                }
                 _ => {
                     if status & 0xf0 == 0xb0 && matches!(key, 120 | 123) {
-                        notes[channel].fill(0);
+                        notes.retain(|(_, ch, _), _| *ch != channel);
                     }
                     event.micros = 0;
                     events.push(event);
                 }
             }
         }
-        for (channel, keys) in notes.iter().enumerate() {
-            for (key, &velocity) in keys.iter().enumerate().filter(|(_, v)| **v > 0) {
-                events.push(Packet {
-                    micros: 0,
-                    bytes: [0x90 | channel as u8, key as u8, velocity],
-                    len: 3,
-                });
-            }
+        for ((track, channel, key), velocity) in notes {
+            events.push(Packet {
+                track,
+                micros: 0,
+                bytes: [0x90 | channel as u8, key, velocity],
+                len: 3,
+            });
         }
         for event in &mut self.packets {
             event.micros -= offset;
@@ -660,7 +671,7 @@ impl Song {
         let solo = self.tracks.iter().any(|track| track.solo);
         let mut events = Vec::new();
         let mut end = 0;
-        for track in &self.tracks {
+        for (index, track) in self.tracks.iter().enumerate() {
             let audible = !track.mute && (!solo || track.solo);
             if audible {
                 end = end.max(track.end);
@@ -669,18 +680,18 @@ impl Song {
                 if matches!(event, Event::Meta(MetaMessage::Tempo(_)))
                     || (audible && matches!(event, Event::Midi(..)))
                 {
-                    events.push((*tick, event));
+                    events.push((*tick, index, event));
                     end = end.max(*tick);
                 }
             }
         }
-        events.sort_by_key(|&(tick, _)| tick);
+        events.sort_by_key(|&(tick, _, _)| tick);
         let ppq = u128::from(self.ppq);
         let mut elapsed = 0_u128;
         let mut previous = 0;
         let mut tempo = 500_000;
         let mut packets = Vec::new();
-        for (tick, event) in events {
+        for (tick, track, event) in events {
             elapsed += u128::from(tick - previous) * u128::from(tempo);
             previous = tick;
             match event {
@@ -705,6 +716,7 @@ impl Song {
                         }
                     };
                     packets.push(Packet {
+                        track,
                         micros: (elapsed / ppq).min(u128::from(u64::MAX)) as u64,
                         bytes: [status | channel, a, b],
                         len,
@@ -715,6 +727,8 @@ impl Song {
         }
         elapsed += u128::from(end - previous) * u128::from(tempo);
         Timeline {
+            instrument_tracks:self.tracks.iter().enumerate().filter(|(_,t)|t.events.iter().any(|(_,event)|matches!(event,Event::Midi(_,MidiMessage::NoteOn{vel,..}) if vel.as_int()>0))).map(|(index,_)|index).collect(),
+            buses: self.tracks.iter().map(|t| t.bus.clone()).collect(),
             packets,
             duration: (elapsed / ppq).min(u128::from(u64::MAX)) as u64,
         }

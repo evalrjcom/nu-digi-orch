@@ -116,10 +116,16 @@ impl Drop for Playback {
     }
 }
 
+struct Stem {
+    synth: Synthesizer,
+    filter: crate::bus::Filter,
+    track: usize,
+}
 struct Renderer {
     rack: crate::effects::Rack,
     levels: Arc<crate::effects::Levels>,
-    synth: Synthesizer,
+    stems: Vec<Stem>,
+    master: crate::bus::Filter,
     timeline: Timeline,
     index: usize,
     frame: u64,
@@ -144,13 +150,23 @@ impl Renderer {
     ) -> Result<Self> {
         let mut settings = SynthesizerSettings::new(rate as i32);
         settings.block_size = 32;
-        let synth = Synthesizer::new(font, &settings)?;
+        let mut stems = Vec::new();
+        for &track in &timeline.instrument_tracks {
+            {
+                stems.push(Stem {
+                    synth: Synthesizer::new(font, &settings)?,
+                    filter: crate::bus::Filter::new(rate),
+                    track,
+                });
+            }
+        }
         // A sub-sample loop still needs one frame to make progress in the callback.
         let release_frame = frames(timeline.duration, rate).max(1);
         Ok(Self {
             rack: crate::effects::Rack::new(rate),
             levels,
-            synth,
+            stems,
+            master: crate::bus::Filter::new(rate),
             timeline,
             index: 0,
             frame: 0,
@@ -162,10 +178,21 @@ impl Renderer {
         })
     }
 
+    fn dispatch(stems: &mut [Stem], p: Packet) {
+        let [status, a, b] = p.bytes.map(i32::from);
+        for stem in stems {
+            if !matches!(status & 0xf0, 0x80 | 0x90) || stem.track == p.track {
+                stem.synth
+                    .process_midi_message(status & 15, status & 0xf0, a, b);
+            }
+        }
+    }
     fn render(&mut self, mut left: &mut [f32], mut right: &mut [f32]) {
         while !left.is_empty() {
             if self.looping && self.frame >= self.end_frame {
-                self.synth.reset();
+                for stem in &mut self.stems {
+                    stem.synth.reset();
+                }
                 self.frame = 0;
                 self.index = 0;
             } else if self.frame >= self.end_frame {
@@ -178,13 +205,13 @@ impl Renderer {
                 if frames(packet.micros, self.rate) > self.frame {
                     break;
                 }
-                let [status, a, b] = packet.bytes.map(i32::from);
-                self.synth
-                    .process_midi_message(status & 15, status & 0xf0, a, b);
+                Self::dispatch(&mut self.stems, *packet);
                 self.index += 1;
             }
             if !self.looping && !self.released && self.frame >= self.release_frame {
-                self.synth.note_off_all(false);
+                for stem in &mut self.stems {
+                    stem.synth.note_off_all(false);
+                }
                 self.released = true;
             }
 
@@ -201,8 +228,24 @@ impl Renderer {
             let count = (boundary.min(next_event) - self.frame).min(left.len() as u64) as usize;
             let (out_left, rest_left) = left.split_at_mut(count);
             let (out_right, rest_right) = right.split_at_mut(count);
-            self.synth.render(out_left, out_right);
+            out_left.fill(0.);
+            out_right.fill(0.);
+            for stem in &mut self.stems {
+                for (l, r) in out_left.chunks_mut(256).zip(out_right.chunks_mut(256)) {
+                    let mut a = [0.; 256];
+                    let mut b = [0.; 256];
+                    let n = l.len();
+                    stem.synth.render(&mut a[..n], &mut b[..n]);
+                    stem.filter
+                        .process(&mut a[..n], &mut b[..n], &self.timeline.buses[stem.track]);
+                    for i in 0..n {
+                        l[i] += a[i];
+                        r[i] += b[i];
+                    }
+                }
+            }
             self.rack.process(out_left, out_right, self.levels.get());
+            self.master.process(out_left, out_right, &self.levels.1);
             self.frame += count as u64;
             left = rest_left;
             right = rest_right;
@@ -211,6 +254,10 @@ impl Renderer {
 }
 
 impl Playback {
+    pub fn is_software(&self) -> bool {
+        matches!(self.backend, Backend::Software { .. })
+    }
+
     pub fn software(
         font: &Arc<SoundFont>,
         timeline: Timeline,
@@ -243,18 +290,14 @@ impl Playback {
                     move |out: &mut [$sample], _| {
                         for update in updates.try_iter() {
                             if let Some(micros) = update.reposition {
-                                renderer.synth.reset();
+                                for stem in &mut renderer.stems {
+                                    stem.synth.reset();
+                                }
                                 renderer.frame = frames(micros, renderer.rate);
                                 renderer.released = false;
                             }
                             for packet in update.messages {
-                                let [status, a, b] = packet.bytes.map(i32::from);
-                                renderer.synth.process_midi_message(
-                                    status & 15,
-                                    status & 0xf0,
-                                    a,
-                                    b,
-                                );
+                                Renderer::dispatch(&mut renderer.stems, packet);
                             }
                             renderer.timeline = update.timeline;
                             renderer.index = renderer.timeline.packets.partition_point(|p| {
@@ -466,4 +509,34 @@ pub fn export_wav(
     output.finalize()?;
     temp.persist(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod mix_tests {
+    use super::*;
+    use crate::{effects::Levels, song::Song};
+
+    #[test]
+    #[ignore = "requires an SF2 path in NU_DIGI_ORCH_SF2"]
+    fn soundfont_stems_and_master_process_real_audio() {
+        let font = load_font(Path::new(&std::env::var("NU_DIGI_ORCH_SF2").unwrap())).unwrap();
+        let song = Song::demo();
+        let levels = Arc::new(Levels::default());
+        let render = || {
+            let mut engine =
+                Renderer::new(&font, song.timeline(), 44100, false, levels.clone()).unwrap();
+            let mut left = vec![0.; 44100];
+            let mut right = left.clone();
+            engine.render(&mut left, &mut right);
+            left
+        };
+        let dry = render();
+        assert!(song.tracks.iter().all(|track| track.bus.rms() > 0.));
+        assert!(levels.1.rms() > 0.);
+        song.tracks[1].bus.set(10, -6, 100);
+        let shaped = render();
+        assert!(dry.iter().zip(shaped).any(|(a, b)| (a - b).abs() > 0.001));
+        levels.1.set(0, 0, 0);
+        assert!(render().iter().all(|&sample| sample == 0.));
+    }
 }

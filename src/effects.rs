@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 // One atomic snapshot per block keeps UI changes off the audio thread's locks.
 #[derive(Default)]
-pub struct Levels(AtomicU32);
+pub struct Levels(AtomicU32, pub crate::bus::Bus);
 impl Levels {
     pub fn get(&self) -> [u8; 3] {
         let [r, c, d, _] = self.0.load(Ordering::Relaxed).to_le_bytes();
@@ -17,7 +17,10 @@ impl Levels {
         );
     }
     pub fn snapshot(&self) -> Self {
-        Self(AtomicU32::new(self.0.load(Ordering::Relaxed)))
+        Self(
+            AtomicU32::new(self.0.load(Ordering::Relaxed)),
+            self.1.snapshot(),
+        )
     }
 }
 
