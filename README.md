@@ -6,7 +6,9 @@ Nu Digi Orch is a lightweight desktop MIDI composer in Rust and FLTK. It combine
 
 The composer opens in split view. The upper table combines track names, channel, program, bank, volume, pan, mute, and solo with the arrangement lanes. Click a row to edit that track in the piano roll below. Double-click a name or numeric cell to edit it, or click M or S to toggle mute or solo. Scroll over the table to reach additional tracks.
 
-Choose **Full roll** or double-click an arrangement lane to expand the piano roll across the editing area. **Split view** restores the table. Both panes share the same beat grid and playback position.
+Choose **Full track view** for the arrangement alone. Click a beat on either ruler to cue playback or jump while playing. Play and Loop start at the cue, and Stop resets it. Use the tempo +/− buttons or click the up/down controls beside channel, program, bank, volume, or pan. Select a numeric cell to adjust it with the keyboard arrow keys.
+
+Choose **Full piano roll** or double-click an arrangement lane to expand the piano roll across the editing area. **Split view** restores the table. Both panes share the same beat grid and playback position.
 
 During playback and recording, the amber vertical line marks the current musical position in both views. It follows tempo changes, advances to the next 16-beat page, and returns to the beginning during loop playback.
 

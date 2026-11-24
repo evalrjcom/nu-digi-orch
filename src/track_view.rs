@@ -36,8 +36,42 @@ fn first_lane(frame: &Frame, model: &Model) -> usize {
     model.track / rows * rows
 }
 
+pub(super) fn seek_ruler(
+    f: &Frame,
+    m: &Model,
+    e: Event,
+    gutter: i32,
+    tx: app::Sender<Action>,
+) -> bool {
+    let x = app::event_x() - f.x() - gutter;
+    if e == Event::Push
+        && app::event_mouse_button() == MouseButton::Left
+        && (0..RULER).contains(&(app::event_y() - f.y()))
+        && (0..f.w() - gutter).contains(&x)
+    {
+        let beat = m.view_beat + x as u64 * BEATS / (f.w() - gutter) as u64;
+        tx.send(Action::Seek(beat * u64::from(m.song.ppq)));
+        return true;
+    }
+    false
+}
 pub(super) fn handle(frame: &Frame, model: &Model, event: Event, tx: app::Sender<Action>) -> bool {
+    if seek_ruler(frame, model, event, GUTTER, tx) {
+        return true;
+    }
     match event {
+        Event::Focus | Event::Unfocus => true,
+        Event::KeyDown
+            if (2..=6).contains(&model.column)
+                && matches!(app::event_key(), Key::Up | Key::Down) =>
+        {
+            tx.send(Action::Step(
+                model.track,
+                model.column,
+                if app::event_key() == Key::Up { 1 } else { -1 },
+            ));
+            true
+        }
         Event::MouseWheel => {
             let index = model
                 .track
@@ -47,6 +81,7 @@ pub(super) fn handle(frame: &Frame, model: &Model, event: Event, tx: app::Sender
             true
         }
         Event::Push if app::event_mouse_button() == MouseButton::Left => {
+            let _ = frame.clone().take_focus();
             let y = app::event_y() - frame.y() - RULER;
             if y >= 0 {
                 let index = first_lane(frame, model) + (y / LANE) as usize;
@@ -55,10 +90,22 @@ pub(super) fn handle(frame: &Frame, model: &Model, event: Event, tx: app::Sender
                     let col = OFFSETS
                         .partition_point(|&offset| offset <= x)
                         .saturating_sub(1);
-                    if (7..=8).contains(&col) || ((1..=6).contains(&col) && app::event_clicks()) {
+                    if (2..=6).contains(&col) && x >= OFFSETS[col + 1] - 12 {
+                        tx.send(Action::Step(
+                            index,
+                            col,
+                            if y % LANE < LANE / 2 { 1 } else { -1 },
+                        ));
+                    } else if (7..=8).contains(&col)
+                        || ((1..=6).contains(&col) && app::event_clicks())
+                    {
                         tx.send(Action::Cell(index, col));
                     } else {
-                        tx.send(Action::Lane(index, app::event_clicks() && x >= GUTTER));
+                        if (2..=6).contains(&col) {
+                            tx.send(Action::FocusCell(index, col));
+                        } else {
+                            tx.send(Action::Lane(index, app::event_clicks() && x >= GUTTER));
+                        }
                     }
                 }
             }
@@ -105,6 +152,11 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
         draw::draw_rect_fill(x, top, w, LANE - 1, fill);
         draw::set_draw_color(TEXT);
         cells(x, top, values(index, track));
+        for right in &OFFSETS[3..=7] {
+            let cx = x + right - 6;
+            draw::draw_polygon(cx - 3, top + 9, cx + 3, top + 9, cx, top + 5);
+            draw::draw_polygon(cx - 3, top + 15, cx + 3, top + 15, cx, top + 19);
+        }
         let ink = if track.mute || (solo && !track.solo) {
             SUBTLE
         } else {

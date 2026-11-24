@@ -94,6 +94,49 @@ pub struct Timeline {
     pub duration: u64,
 }
 
+impl Timeline {
+    pub fn seek(&mut self, offset: u64) {
+        if offset == 0 {
+            return;
+        }
+        let mut notes = [[0u8; 128]; 16];
+        let mut events = Vec::new();
+        for mut event in self
+            .packets
+            .drain(..self.packets.partition_point(|p| p.micros < offset))
+        {
+            let [status, key, value] = event.bytes;
+            let channel = usize::from(status & 15);
+            match status & 0xf0 {
+                0x80 => notes[channel][usize::from(key)] = 0,
+                0x90 => notes[channel][usize::from(key)] = value,
+                _ => {
+                    if status & 0xf0 == 0xb0 && matches!(key, 120 | 123) {
+                        notes[channel].fill(0);
+                    }
+                    event.micros = 0;
+                    events.push(event);
+                }
+            }
+        }
+        for (channel, keys) in notes.iter().enumerate() {
+            for (key, &velocity) in keys.iter().enumerate().filter(|(_, v)| **v > 0) {
+                events.push(Packet {
+                    micros: 0,
+                    bytes: [0x90 | channel as u8, key as u8, velocity],
+                    len: 3,
+                });
+            }
+        }
+        for event in &mut self.packets {
+            event.micros -= offset;
+        }
+        events.append(&mut self.packets);
+        self.packets = events;
+        self.duration -= offset;
+    }
+}
+
 fn invalid(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }

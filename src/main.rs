@@ -7,7 +7,7 @@ mod track_view;
 
 use fltk::{
     app::{self, MouseButton},
-    button::{Button, CheckButton},
+    button::Button,
     dialog, draw,
     enums::{Align, Color, Event, Font, FrameType, Key, Shortcut},
     frame::Frame,
@@ -61,6 +61,10 @@ enum Action {
     Tempo,
     View,
     ToggleEditor,
+    Seek(Tick),
+    Step(usize, usize, i16),
+    FocusCell(usize, usize),
+    TempoStep(i8),
     Lane(usize, bool),
     Play,
     Record,
@@ -94,6 +98,10 @@ struct Model {
     inputs: Vec<recording::InputPort>,
     view_beat: Tick,
     track_view: bool,
+    tracks_only: bool,
+    column: usize,
+    cue: Tick,
+    offset: u64,
     lanes: Vec<Vec<Note>>,
     playhead: Tick,
     tick_at_time: Box<dyn Fn(u64) -> Tick>,
@@ -109,6 +117,10 @@ impl Model {
             step: u64::from(song.ppq) / 4,
             tick_at_time: Box::new(song.tempo_clock()),
             track_view: true,
+            tracks_only: false,
+            column: 2,
+            cue: 0,
+            offset: 0,
             lanes: vec![],
             playhead: 0,
             duration_micros: 0,
@@ -157,6 +169,8 @@ impl Model {
     }
     fn replace(&mut self, song: Song, path: Option<PathBuf>, dirty: bool) {
         self.playback = None;
+        self.cue = 0;
+        self.playhead = 0;
         self.song = song;
         self.path = path;
         self.dirty = dirty;
@@ -231,7 +245,7 @@ struct Ui {
     audio_device: Choice,
     midi_input: Choice,
     font: Frame,
-    looping: CheckButton,
+    looping: fltk::button::ToggleButton,
     beat: IntInput,
     pitch: IntInput,
     snap: Choice,
@@ -241,7 +255,7 @@ struct Ui {
     duration: IntInput,
     velocity: IntInput,
     grid: Frame,
-    toggle_editor: Button,
+    toggle_editor: Choice,
 
     status: Frame,
     clock: Frame,
@@ -279,16 +293,18 @@ impl Ui {
             menu_item(&mut menu, path, key, tx, action);
         }
 
-        let mut play = button(16, 43, 66, "Play", tx, Action::Play);
+        let mut play = button(16, 43, 45, "@>", tx, Action::Play);
         play.set_color(ACCENT);
         play.set_label_color(BG);
-        button(88, 43, 64, "Stop", tx, Action::Stop);
-        let looping = CheckButton::new(166, 44, 67, 28, "Loop");
+        button(65, 43, 45, "@square", tx, Action::Stop).set_tooltip("Stop");
+        play.set_tooltip("Play");
+        let looping = fltk::button::ToggleButton::new(165, 43, 68, 29, "Loop");
         flat_label(239, 43, 40, 29, "BPM", 13, SUBTLE);
         let mut bpm = Input::new(277, 44, 61, 26, None);
         bpm.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
         bpm.emit(tx, Action::Tempo);
-        button(345, 43, 48, "Set", tx, Action::Tempo);
+        button(340, 43, 26, "−", tx, Action::TempoStep(-1));
+        button(368, 43, 26, "+", tx, Action::TempoStep(1));
         flat_label(414, 43, 53, 29, "Output", 13, SUBTLE);
         let mut output = Choice::new(468, 43, 241, 29, None);
         output.add_choice("Software SoundFont");
@@ -349,6 +365,11 @@ impl Ui {
         let handle_model = Rc::clone(model);
         let mut drag = None;
         grid.handle(move |frame, event| {
+            if let Ok(m) = handle_model.try_borrow() {
+                if track_view::seek_ruler(frame, &m, event, roll_gutter(&m), tx) {
+                    return true;
+                }
+            }
             let point = || {
                 let model = handle_model.try_borrow().ok()?;
                 grid_point(frame, &model, app::event_x(), app::event_y())
@@ -399,12 +420,16 @@ impl Ui {
         button(808, 631, 62, "Apply", tx, Action::ApplyNote);
         button(879, 631, 76, "Quantize", tx, Action::SnapNote);
         button(964, 631, 66, "Delete", tx, Action::DeleteNote);
-        let toggle_editor = button(938, 83, 95, "Piano roll", tx, Action::ToggleEditor);
+        let mut toggle_editor = Choice::new(938, 83, 226, 29, None);
+        toggle_editor.add_choice("Split view|Full track view|Full piano roll");
+        toggle_editor.set_value(0);
+        toggle_editor.emit(tx, Action::ToggleEditor);
         let mut midi_input = Choice::new(1045, 632, 119, 28, None);
         midi_input.add_choice("MIDI input…");
         midi_input.set_value(0);
         midi_input.set_tooltip("Choose a MIDI input, then press Record.");
-        let mut record = button(1039, 83, 125, "Record MIDI", tx, Action::Record);
+        let mut record = button(114, 43, 45, "@circle", tx, Action::Record);
+        record.set_label_color(Color::Red);
         record.set_tooltip("Start a new MIDI take. Press Stop to keep it.");
         flat_label(808, 681, 99, 27, "Audio device", 13, SUBTLE);
         let mut audio_device = Choice::new(908, 681, 256, 29, None);
@@ -430,13 +455,15 @@ impl Ui {
             let mut grid = layout_grid.clone();
             let mut tracks = layout_tracks.clone();
             let height = h - 228;
-            let split = if tracks.visible() {
+            let split = if !grid.visible() {
+                height
+            } else if tracks.visible() {
                 height * 45 / 100
             } else {
                 0
             };
             tracks.resize(16, 120, w - 32, split.max(1));
-            grid.resize(16, 120 + split, w - 32, height - split);
+            grid.resize(16, 120 + split, w - 32, (height - split).max(1));
         });
         win.set_callback(move |_| tx.send(Action::Quit));
         Self {
@@ -505,7 +532,9 @@ impl Ui {
         }
         let width = self.win.w() - 32;
         let height = self.win.h() - 228;
-        let split = if model.track_view {
+        let split = if model.tracks_only {
+            height
+        } else if model.track_view {
             height * 45 / 100
         } else {
             0
@@ -516,15 +545,20 @@ impl Ui {
         } else {
             self.arrangement.hide();
         }
-        self.grid.resize(16, 120 + split, width, height - split);
-        self.toggle_editor.set_label(if model.track_view {
-            "Full roll"
+        self.grid
+            .resize(16, 120 + split, width, (height - split).max(1));
+        if model.tracks_only {
+            self.grid.hide();
         } else {
-            "Split view"
-        });
-        if model.playback.is_none() && model.recording.is_none() {
-            model.playhead = 0;
+            self.grid.show();
         }
+        self.toggle_editor.set_value(if model.tracks_only {
+            1
+        } else if model.track_view {
+            0
+        } else {
+            2
+        });
         if let Some(note) = model.selected {
             self.start.set_value(&note.start.to_string());
             self.key.set_value(&note.key.to_string());
@@ -865,7 +899,8 @@ fn apply(
     }
     match action {
         Action::ToggleEditor => {
-            model.track_view = !model.track_view;
+            model.tracks_only = ui.toggle_editor.value() == 1;
+            model.track_view = ui.toggle_editor.value() != 2;
             ui.status.set_label(if model.track_view {
                 "Select a track or double-click a lane to edit its notes."
             } else {
@@ -879,6 +914,7 @@ fn apply(
                 model.fit_pitch();
                 if edit_notes {
                     model.track_view = false;
+                    model.tracks_only = false;
                 }
             }
         }
@@ -963,10 +999,22 @@ fn apply(
             model.track = model.track.min(model.song.tracks.len() - 1);
             model.selected = None;
         }
-        Action::Cell(index, col) => {
+        Action::FocusCell(index, col) => {
+            model.column = col;
+            return apply(Action::Lane(index, false), ui, model, background);
+        }
+        Action::Cell(index, col) | Action::Step(index, col, _) => {
             let track = &model.song.tracks[index];
+            model.column = col;
             let values = track_view::values(index, track);
-            let input = if col < 7 {
+            let input = if let Action::Step(_, _, d) = action {
+                (values[col].parse::<i16>()? + d)
+                    .clamp(
+                        if col == 2 { 1 } else { 0 },
+                        if col == 2 { 16 } else { 127 },
+                    )
+                    .to_string()
+            } else if col < 7 {
                 let Some(text) = dialog::input_default(track_view::HEADERS[col], &values[col])
                 else {
                     return Ok(true);
@@ -1022,6 +1070,14 @@ fn apply(
                 model.selected = None;
             }
         }
+        Action::TempoStep(d) => {
+            ui.bpm.set_value(
+                &(model.song.bpm() + f64::from(d))
+                    .clamp(4., 999.)
+                    .to_string(),
+            );
+            return apply(Action::Tempo, ui, model, background);
+        }
         Action::Tempo => {
             let bpm: f64 = ui
                 .bpm
@@ -1057,14 +1113,37 @@ fn apply(
             model.playback = None;
             ui.refresh_outputs(model);
         }
+        Action::Seek(tick) => {
+            let playing = model.playback.take().is_some();
+            model.cue = tick;
+            model.playhead = tick;
+            if playing {
+                return apply(Action::Play, ui, model, background);
+            }
+        }
         Action::Play => {
-            let timeline = model.song.timeline();
+            let mut timeline = model.song.timeline();
             if timeline.packets.is_empty() || timeline.duration == 0 {
                 return Err("Add notes to an audible track before playing.".into());
             }
             model.playback = None;
             model.tick_at_time = Box::new(model.song.tempo_clock());
             model.duration_micros = timeline.duration;
+            let mut low = 0;
+            let mut high = timeline.duration;
+            while low < high {
+                let mid = low + (high - low) / 2;
+                if (model.tick_at_time)(mid) < model.cue {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            if low >= timeline.duration {
+                return Err("Choose a beat before the end of the song.".into());
+            }
+            model.offset = low;
+            timeline.seek(low);
             let looping = ui.looping.value();
             model.playback = Some(if ui.output.value() > 0 {
                 let port = model
@@ -1085,8 +1164,7 @@ fn apply(
                 };
                 audio::Playback::software(font, timeline, looping, device)?
             });
-            model.view_beat = 0;
-            model.playhead = 0;
+            model.playhead = model.cue;
             ui.status.set_label("Playing");
         }
         Action::Record => {
@@ -1109,6 +1187,9 @@ fn apply(
             }
         }
         Action::Stop => {
+            model.playhead = 0;
+            model.cue = 0;
+            model.view_beat = 0;
             if let Some(recording) = model.recording.take() {
                 let (duration, events) = recording.finish(std::mem::take(&mut model.captured));
                 if events.is_empty() {
@@ -1304,6 +1385,7 @@ fn main() {
                 .progress
                 .position
                 .load(Ordering::Relaxed)
+                .saturating_add(model.offset)
                 .min(model.duration_micros);
             let elapsed = micros / 100_000;
             let label = format!(
