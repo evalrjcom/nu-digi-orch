@@ -45,11 +45,47 @@ fn channel_message(bytes: &[u8]) -> Option<[u8; 3]> {
 pub struct Recording {
     dropped: Arc<AtomicUsize>,
     started: Instant,
-    connection: MidiInputConnection<()>,
+    connection: Option<MidiInputConnection<()>>,
     received: mpsc::Receiver<(u64, [u8; 3])>,
 }
 
+pub struct Capture {
+    send: mpsc::SyncSender<(u64, [u8; 3])>,
+    started: Instant,
+    dropped: Arc<AtomicUsize>,
+}
+impl Capture {
+    pub fn send(&self, bytes: [u8; 3]) {
+        if let Err(mpsc::TrySendError::Full(_)) = self
+            .send
+            .try_send((self.started.elapsed().as_micros() as u64, bytes))
+        {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 impl Recording {
+    pub fn virtual_piano() -> (Self, Capture) {
+        let (send, received) = mpsc::sync_channel(8192);
+        let started = Instant::now();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let capture = Capture {
+            send,
+            started,
+            dropped: dropped.clone(),
+        };
+        (
+            Self {
+                dropped,
+                started,
+                connection: None,
+                received,
+            },
+            capture,
+        )
+    }
+
     pub fn start(port: &MidiInputPort) -> Result<Self> {
         let mut midi = MidiInput::new("Nu Digi Orch")?;
         midi.ignore(Ignore::All);
@@ -77,7 +113,7 @@ impl Recording {
         Ok(Self {
             dropped,
             started,
-            connection,
+            connection: Some(connection),
             received,
         })
     }
@@ -92,7 +128,9 @@ impl Recording {
 
     pub fn finish(self, mut events: Vec<(u64, [u8; 3])>) -> (u64, Vec<(u64, [u8; 3])>, usize) {
         let elapsed = self.elapsed();
-        self.connection.close();
+        if let Some(connection) = self.connection {
+            connection.close();
+        }
         events.extend(self.received.try_iter());
         (elapsed, events, self.dropped.load(Ordering::Relaxed))
     }

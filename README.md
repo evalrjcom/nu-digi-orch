@@ -83,6 +83,13 @@ Track and mixer views show the instrument associated with each track’s initial
 
 ## Virtual piano and track effects
 
-With an SF2 loaded, open **Playback → Virtual piano** or press **Ctrl+K**. The window auditions the channel, bank, and patch of the track selected when you open it. Click a piano key or hold its printed computer key. The Z–M and Q–I rows provide two octaves with the intervening keys for sharps. The left and right arrows move the keyboard by an octave.
+With an SF2 loaded, open **Playback → Virtual piano** or press **Ctrl+K**. The window auditions the channel, bank, and patch of the track selected when you open it. Click a piano key or hold its printed computer key. The white keys are `qwertyuiop[]\`. Number keys `1–9` play the black keys from left to right. The left and right arrows move the keyboard by an octave.
 
 In **Track Mixer**, drag the Reverb, Chorus, or Delay slider on an individual track. These effects process that track’s SoundFont audio before the master effects and are included in GUI WAV exports. The amounts are session settings.
+
+
+## Recording and metronome
+
+Select a track and press **Ctrl+R** or choose **Track → Record into selected track** to overdub from the playhead. The red Record button starts a separate take from the beginning. Select a MIDI input for hardware capture, or leave the selector on **MIDI input…** to open and record the virtual piano. Press **Stop** to keep the take. **Escape** also stops a take from the virtual piano window.
+
+Enable **Metronome** before playing or recording for a tempo-map-aware quarter-note woodblock click with an accent every four beats. The click uses the selected playback output and stays out of MIDI saves and WAV exports. With the metronome enabled, recording provides up to one hour of click past the starting position.

@@ -82,6 +82,8 @@ enum Action {
     Lane(usize, bool),
     Play,
     Record,
+    RecordSelected,
+    RecordBacking,
     Stop,
     OutputChanged,
     LoadFont,
@@ -109,6 +111,9 @@ struct Model {
     playback: Option<audio::Playback>,
     recording: Option<recording::Recording>,
     captured: Vec<(u64, [u8; 3])>,
+    record_target: Option<usize>,
+    record_offset: u64,
+    click: bool,
     export_in_progress: bool,
     inputs: Vec<recording::InputPort>,
     view_beat: Tick,
@@ -158,6 +163,9 @@ impl Model {
             playback: None,
             recording: None,
             captured: Vec::new(),
+            record_target: None,
+            record_offset: 0,
+            click: false,
             export_in_progress: false,
             inputs: Vec::new(),
             view_beat: 0,
@@ -274,6 +282,7 @@ struct Ui {
     midi_input: Choice,
     font: Frame,
     looping: fltk::button::ToggleButton,
+    metronome: fltk::button::ToggleButton,
     beat: IntInput,
     pitch: IntInput,
     snap: Choice,
@@ -315,6 +324,11 @@ impl Ui {
             ("Edit/Redo", Some('y'), Action::Redo),
             ("Edit/Delete Note", None, Action::DeleteNote),
             ("Edit/Quantize Selected Note", None, Action::SnapNote),
+            (
+                "Track/Record into selected track",
+                Some('r'),
+                Action::RecordSelected,
+            ),
             ("Track/Add Track", None, Action::AddTrack),
             ("Track/Remove Track", None, Action::RemoveTrack),
             (
@@ -394,8 +408,8 @@ impl Ui {
         output.add_choice("Software SoundFont");
         output.set_value(0);
         output.emit(tx, Action::OutputChanged);
-        button(821, 43, 114, "Load SF2…", tx, Action::LoadFont);
-        let font = flat_label(947, 43, 174, 29, "Choose an SF2 file", 12, SUBTLE);
+        button(821, 43, 92, "Load SF2…", tx, Action::LoadFont);
+        let font = flat_label(921, 43, 100, 29, "Choose an SF2 file", 12, SUBTLE);
 
         flat_label(16, 85, 37, 25, "View", 13, SUBTLE);
         button(232, 83, 68, "+ Track", tx, Action::AddTrack);
@@ -532,6 +546,8 @@ impl Ui {
         midi_input.add_choice("MIDI input…");
         midi_input.set_value(0);
         midi_input.set_tooltip("Choose a MIDI input, then press Record.");
+        let mut metronome = fltk::button::ToggleButton::new(1030, 43, 116, 29, "Metronome");
+        metronome.set_tooltip("Enable the click before starting playback or recording.");
         let mut record = button(114, 43, 45, "@circle", tx, Action::Record);
         record.set_label_color(Color::Red);
         record.set_tooltip("Start a new MIDI take. Press Stop to keep it.");
@@ -638,7 +654,7 @@ impl Ui {
             arrangement,
             preset,
             preset_window,
-            keyboard: keyboard::Keyboard::new(),
+            keyboard: keyboard::Keyboard::new(tx),
             last_stop: None,
             presets: Vec::new(),
             bpm,
@@ -647,6 +663,7 @@ impl Ui {
             midi_input,
             font,
             looping,
+            metronome,
             beat,
             pitch,
             snap,
@@ -1101,6 +1118,9 @@ fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
     timeline.duration = timeline.duration.max(time_for(end_tick));
     model.duration_micros = timeline.duration;
     model.offset = time_for(model.cue).min(timeline.duration.saturating_sub(1));
+    if model.click {
+        add_click(&mut timeline, &model.song);
+    }
     timeline.seek(model.offset);
     let position = time_for(tick)
         .saturating_sub(model.offset)
@@ -1142,6 +1162,36 @@ fn mixer_message(track: usize, channel: u8, controller: Option<u8>, value: u8) -
     }
 }
 
+// Insert an isolated GM woodblock stem into the playback timeline only.
+fn add_click(timeline: &mut song::Timeline, song: &Song) {
+    let track = timeline.buses.len();
+    timeline.buses.push(Arc::default());
+    timeline.instrument_tracks.push(track);
+    let clock = song.tempo_clock();
+    let beat_ticks = u64::from(song.ppq);
+    let beats = clock(timeline.duration) / beat_ticks;
+    for beat in 0..=beats.min(120_000) {
+        let time = tick_time(&clock, beat * beat_ticks, timeline.duration);
+        if time >= timeline.duration {
+            break;
+        }
+        let (key, velocity) = if beat % 4 == 0 { (76, 115) } else { (77, 90) };
+        timeline.packets.push(song::Packet {
+            track,
+            micros: time,
+            bytes: [0x99, key, velocity],
+            len: 3,
+        });
+        timeline.packets.push(song::Packet {
+            track,
+            micros: time.saturating_add(45_000).min(timeline.duration),
+            bytes: [0x89, key, 0],
+            len: 3,
+        });
+    }
+    timeline.packets.sort_by_key(|p| p.micros);
+}
+
 fn tick_time(clock: &dyn Fn(u64) -> Tick, tick: Tick, duration: u64) -> u64 {
     let mut low = 0;
     let mut high = duration;
@@ -1181,6 +1231,7 @@ fn apply(
         && !matches!(
             action,
             Action::Stop
+                | Action::RecordBacking
                 | Action::OutputChanged
                 | Action::View
                 | Action::Lane(..)
@@ -1589,7 +1640,7 @@ fn apply(
                 return apply(Action::Play, ui, model, background);
             }
         }
-        Action::Play => {
+        Action::Play | Action::RecordBacking => {
             ui.last_stop = None;
             if let Some(playback) = &model.playback {
                 if playback.progress.paused.swap(false, Ordering::AcqRel) {
@@ -1598,6 +1649,15 @@ fn apply(
                 }
             }
             let mut timeline = model.song.timeline();
+            if model.recording.is_some() && ui.metronome.value() {
+                timeline.duration = timeline
+                    .duration
+                    .max(model.record_offset.saturating_add(3_600_000_000));
+            }
+            model.click = ui.metronome.value();
+            if model.click {
+                add_click(&mut timeline, &model.song);
+            }
             if timeline.packets.is_empty() || timeline.duration == 0 {
                 return Err("Add notes to an audible track before playing.".into());
             }
@@ -1613,7 +1673,7 @@ fn apply(
             }
             model.offset = low;
             timeline.seek(low);
-            let looping = ui.looping.value();
+            let looping = ui.looping.value() && model.recording.is_none();
             model.playback = Some(if ui.output.value() > 0 {
                 let port = model
                     .outputs
@@ -1636,17 +1696,55 @@ fn apply(
             model.playhead = model.cue;
             ui.status.set_label("Playing");
         }
-        Action::Record => {
-            let port = ui.midi_input.value().checked_sub(1).and_then(|index| model.inputs.get(index as usize))
-                .ok_or("Choose a MIDI input at the upper right. Use Playback → Refresh Devices if needed.")?;
+        Action::Record | Action::RecordSelected => {
+            let into_track = matches!(action, Action::RecordSelected);
+            let port = ui
+                .midi_input
+                .value()
+                .checked_sub(1)
+                .and_then(|index| model.inputs.get(index as usize));
+            let target = into_track.then_some(model.track);
+            let clock = model.song.tempo_clock();
+            let duration = model.song.timeline().duration;
+            let offset = if into_track {
+                tick_time(&clock, model.playhead, duration)
+            } else {
+                0
+            };
+            let recording = if let Some(port) = port {
+                recording::Recording::start(&port.port)?
+            } else {
+                apply(Action::VirtualKeyboard, ui, model, background)?;
+                let (recording, capture) = recording::Recording::virtual_piano();
+                ui.keyboard.capture(Some(capture));
+                recording
+            };
             model.playback = None;
             model.captured.clear();
-            model.recording = Some(recording::Recording::start(&port.port)?);
-            model.view_beat = 0;
-            model.playhead = 0;
-            model.tick_at_time = Box::new(model.song.tempo_clock());
-            ui.status
-                .set_label("Recording MIDI from the start. Press Stop to keep the take.");
+            model.record_target = target;
+            model.record_offset = offset;
+            model.cue = clock(offset);
+            model.jump_cue = Some(offset);
+            model.playhead = model.cue;
+            model.tick_at_time = Box::new(clock);
+            model.recording = Some(recording);
+            if ui.metronome.value()
+                || into_track
+                    && offset < duration
+                    && (model.font.is_some() || ui.output.value() > 0)
+            {
+                // A failed backing output must not discard the recording.
+                if let Err(error) = apply(Action::RecordBacking, ui, model, background) {
+                    ui.status
+                        .set_label(&format!("Recording without backing audio · {error}"));
+                    return Ok(true);
+                }
+            }
+            ui.status.set_label(if into_track {
+                "Recording into selected track · Stop to keep the take"
+            } else {
+                "Recording new take · Stop to keep it"
+            });
         }
         Action::OutputChanged => {
             if model.playback.take().is_some() {
@@ -1673,13 +1771,20 @@ fn apply(
                 ui.last_stop = Some(now);
             }
             if let Some(recording) = model.recording.take() {
+                ui.keyboard.capture(None);
+                model.playback = None;
                 let (duration, events, dropped) =
                     recording.finish(std::mem::take(&mut model.captured));
                 if events.is_empty() {
                     ui.status.set_label("The MIDI take was empty.");
                 } else {
                     model.checkpoint();
-                    model.track = model.song.add_recording(duration, events);
+                    model.track = model.song.add_recording(
+                        duration,
+                        events,
+                        model.record_offset,
+                        model.record_target.take(),
+                    );
                     model.fit_pitch();
                     model.selected = None;
                     model.view_beat = 0;
@@ -1945,7 +2050,7 @@ fn main() {
             let model = &mut *model;
             if let Some(recording) = &model.recording {
                 recording.drain(&mut model.captured);
-                let micros = recording.elapsed();
+                let micros = model.record_offset.saturating_add(recording.elapsed());
                 let elapsed = micros / 100_000;
                 ui.advance_playhead(model, micros);
                 ui.clock.set_label(&format!(

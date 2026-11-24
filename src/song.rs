@@ -431,15 +431,21 @@ impl Song {
         self.tracks.push(track);
     }
 
-    pub fn add_recording(&mut self, duration: u64, events: Vec<(u64, [u8; 3])>) -> usize {
-        let index = self.tracks.len();
+    pub fn add_recording(
+        &mut self,
+        duration: u64,
+        events: Vec<(u64, [u8; 3])>,
+        offset: u64,
+        target: Option<usize>,
+    ) -> usize {
+        let index = target.unwrap_or(self.tracks.len());
         let mut track = Track::default();
         track.rename(&format!("Take {}", index + 1));
         track.channel = events[0].1[0] & 15;
         let mut active = [[0_u32; 128]; 16];
         let clock = self.tempo_clock();
         for (micros, [status, a, b]) in events {
-            let channel = status & 15;
+            let channel = target.map_or(status & 15, |index| self.tracks[index].channel);
             let a = u7::from(a);
             let b = u7::from(b);
             let count = &mut active[usize::from(channel)][usize::from(a.as_int())];
@@ -470,12 +476,12 @@ impl Song {
                 },
                 _ => continue,
             };
-            track.end = clock(micros);
+            track.end = clock(offset.saturating_add(micros));
             track
                 .events
                 .push((track.end, Event::Midi(channel, message)));
         }
-        track.end = (track.end + 1).max(clock(duration));
+        track.end = (track.end + 1).max(clock(offset.saturating_add(duration)));
         // Finish held keys and pedals even when the input is unplugged mid-take.
         let mut used = [false; 16];
         for (_, event) in &track.events {
@@ -513,7 +519,18 @@ impl Song {
                 ),
             ));
         }
-        self.tracks.push(track);
+        if let Some(target) = target {
+            let existing = &mut self.tracks[target];
+            existing.end = existing.end.max(track.end);
+            existing.events.extend(
+                track
+                    .events
+                    .into_iter()
+                    .filter(|(_, event)| matches!(event, Event::Midi(..))),
+            );
+        } else {
+            self.tracks.push(track);
+        }
         index
     }
 
@@ -807,6 +824,20 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overdub_uses_selected_channel_and_keeps_existing_notes() {
+        let mut song = Song::demo();
+        let channel = song.tracks[1].channel;
+        let before = song.tracks[1].notes().len();
+        let selected = song.add_recording(250_000, vec![(0, [0x90, 72, 90])], 1_000_000, Some(1));
+        assert_eq!(selected, 1);
+        assert_eq!(song.tracks.len(), 2);
+        let notes = song.tracks[1].notes();
+        assert_eq!(notes.len(), before + 1);
+        let note = notes.iter().find(|note| note.key == 72).unwrap();
+        assert_eq!((note.channel, note.start, note.end), (channel, 960, 1200));
+    }
 
     #[test]
     fn imported_patch_follows_first_note_channel_and_setup_events() {

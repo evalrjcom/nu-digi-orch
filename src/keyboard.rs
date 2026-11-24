@@ -1,8 +1,8 @@
 use super::*;
 use std::sync::mpsc::Sender;
 
-const WHITE: [u8; 15] = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24];
-const BLACK: [(usize, u8); 10] = [
+const WHITE: [u8; 13] = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21];
+const BLACK: [(usize, u8); 9] = [
     (0, 1),
     (1, 3),
     (3, 6),
@@ -12,17 +12,17 @@ const BLACK: [(usize, u8); 10] = [
     (8, 15),
     (10, 18),
     (11, 20),
-    (12, 22),
 ];
-const KEYS: &str = "zsxdcvgbhnjmq2w3er5t6y7ui";
+const KEYS: &str = "q1w2er3t4y5ui6o7p[8]9\\";
 
 struct State {
     base: u8,
-    held: [bool; 25],
+    held: [bool; 22],
     mouse: Option<usize>,
     channel: u8,
     sender: Option<Sender<song::Packet>>,
     stream: Option<audio::Playback>,
+    capture: Option<crate::recording::Capture>,
 }
 
 impl State {
@@ -35,14 +35,18 @@ impl State {
         }
         let after = self.held[index] || self.mouse == Some(index);
         if before != after {
+            let note = packet(
+                self.channel,
+                if after { 0x90 } else { 0x80 },
+                self.base + index as u8,
+                if after { 96 } else { 0 },
+                3,
+            );
             if let Some(sender) = &self.sender {
-                let _ = sender.send(packet(
-                    self.channel,
-                    if after { 0x90 } else { 0x80 },
-                    self.base + index as u8,
-                    if after { 96 } else { 0 },
-                    3,
-                ));
+                let _ = sender.send(note);
+            }
+            if let Some(capture) = &self.capture {
+                capture.send(note.bytes);
             }
         }
     }
@@ -73,7 +77,7 @@ pub(super) struct Keyboard {
 }
 
 impl Keyboard {
-    pub fn new() -> Self {
+    pub fn new(tx: app::Sender<Action>) -> Self {
         let mut window = Window::new(140, 160, 720, 222, "Virtual piano");
         window.set_color(BG);
         flat_label(
@@ -81,18 +85,19 @@ impl Keyboard {
             8,
             690,
             28,
-            "Z–M and Q–I play notes    •    ← / → change octave",
+            "Q–\\ play white keys · 1–9 play black keys    •    ← / → change octave",
             14,
             TEXT,
         );
         let mut keys = Frame::new(14, 44, 692, 159, None);
         let state = Rc::new(RefCell::new(State {
             base: 48,
-            held: [false; 25],
+            held: [false; 22],
             mouse: None,
             channel: 0,
             sender: None,
             stream: None,
+            capture: None,
         }));
         let shared = state.clone();
         keys.draw(move |f| {
@@ -192,6 +197,10 @@ impl Keyboard {
                 Event::KeyDown | Event::KeyUp => {
                     let down = event == Event::KeyDown;
                     let key = app::event_key();
+                    if down && key == Key::Escape && s.capture.is_some() {
+                        tx.send(Action::Stop);
+                        return true;
+                    }
                     if down && matches!(key, Key::Left | Key::Right) {
                         s.release();
                         s.base = if key == Key::Left {
@@ -232,6 +241,12 @@ impl Keyboard {
             keys,
             state,
         }
+    }
+
+    pub fn capture(&self, capture: Option<crate::recording::Capture>) {
+        let mut state = self.state.borrow_mut();
+        state.release();
+        state.capture = capture;
     }
 
     pub fn open(
