@@ -1,0 +1,62 @@
+name: Build composer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x64
+            binary: nu-digi-orch
+          - runner: windows-2022
+            platform: windows-x64
+            binary: nu-digi-orch.exe
+          - runner: macos-15
+            platform: macos-arm64
+            binary: nu-digi-orch
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libasound2-dev libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev libxrandr-dev libxss-dev
+      - name: Verify toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc --version
+          cmake --version
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package executable and README
+        shell: bash
+        run: |
+          mkdir dist
+          cp "target/release/${{ matrix.binary }}" dist/
+          cp README.md dist/
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/*' -DestinationPath 'nu-digi-orch-${{ matrix.platform }}.zip'"
+          else
+            tar -czf "nu-digi-orch-${{ matrix.platform }}.tar.gz" -C dist .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nu-digi-orch-${{ matrix.platform }}
+          path: nu-digi-orch-${{ matrix.platform }}.*
+          if-no-files-found: error
