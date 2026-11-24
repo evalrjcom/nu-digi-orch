@@ -154,7 +154,20 @@ impl Model {
         self.undo.clear();
         self.redo.clear();
         self.view_beat = 0;
+        self.high_key = 83;
+        self.fit_pitch();
     }
+    fn fit_pitch(&mut self) {
+        let notes = self.song.tracks[self.track].notes();
+        if let (Some(lowest), Some(highest)) = (
+            notes.iter().map(|note| note.key).min(),
+            notes.iter().map(|note| note.key).max(),
+        ) {
+            let midpoint = (u16::from(lowest) + u16::from(highest)) / 2;
+            self.high_key = (midpoint + ROWS as u16 / 2).clamp(ROWS as u16 - 1, 127) as u8;
+        }
+    }
+
     fn hit(&self, point: GridPoint) -> Option<Note> {
         self.notes.iter().rev().copied().find(|n| {
             n.key == point.key && point.tick >= n.start && point.tick < n.end.max(n.start + 1)
@@ -338,12 +351,12 @@ impl Ui {
         button(536, 83, 50, "Go", tx, Action::View);
         flat_label(605, 85, 42, 25, "Snap", 13, SUBTLE);
         let mut snap = Choice::new(647, 84, 93, 28, None);
-        snap.add_choice("1/4|1/8|1/16|1/32");
+        snap.add_choice("Quarter|Eighth|16th|32nd");
         snap.set_value(2);
         snap.emit(tx, Action::View);
         flat_label(756, 85, 77, 25, "New length", 13, SUBTLE);
         let mut length = Choice::new(834, 84, 93, 28, None);
-        length.add_choice("1/4|1/8|1/16|1/32");
+        length.add_choice("Quarter|Eighth|16th|32nd");
         length.set_value(2);
 
         let mut grid = Frame::new(249, 120, WIDTH - 265, 502, None);
@@ -702,6 +715,14 @@ fn draw_grid(grid: &Frame, model: &Model) {
             Align::Inside | Align::Left,
         );
     }
+    let next_step = model.step - first_tick % model.step;
+    if model.step < u64::from(model.song.ppq) {
+        draw::set_draw_color(Color::from_rgb(41, 52, 67));
+        for offset in (next_step..shown_ticks).step_by(model.step as usize) {
+            let line = x + LABEL + (offset * width as u64 / shown_ticks) as i32;
+            draw::draw_line(line, y + RULER, line, y + h);
+        }
+    }
     for beat in 0..BEATS {
         let line = x + LABEL + (beat * width as u64 / BEATS) as i32;
         let beat = model.view_beat + beat;
@@ -902,9 +923,10 @@ fn apply(
                 .checked_sub(1)
                 .and_then(|index| usize::try_from(index).ok())
             {
-                if index < model.song.tracks.len() {
+                if index < model.song.tracks.len() && model.track != index {
                     model.track = index;
                     model.selected = None;
+                    model.fit_pitch();
                 }
             }
         }
@@ -1045,6 +1067,7 @@ fn apply(
                 } else {
                     model.checkpoint();
                     model.track = model.song.add_recording(duration, events);
+                    model.fit_pitch();
                     model.selected = None;
                     model.view_beat = 0;
                     ui.status.set_label("MIDI take added.");
