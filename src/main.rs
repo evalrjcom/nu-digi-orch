@@ -64,6 +64,7 @@ enum Action {
     Play,
     Record,
     Stop,
+    OutputChanged,
     LoadFont,
     Refresh,
     ApplyNote,
@@ -84,6 +85,7 @@ struct Model {
     dirty: bool,
     font: Option<Arc<rustysynth::SoundFont>>,
     outputs: Vec<audio::Output>,
+    sound_devices: Vec<audio::SoundDevice>,
     playback: Option<audio::Playback>,
     recording: Option<recording::Recording>,
     captured: Vec<(u64, [u8; 3])>,
@@ -109,6 +111,7 @@ impl Model {
             dirty: false,
             font: None,
             outputs: vec![],
+            sound_devices: Vec::new(),
             playback: None,
             recording: None,
             captured: Vec::new(),
@@ -209,6 +212,7 @@ struct Ui {
     solo: CheckButton,
     bpm: Input,
     output: Choice,
+    audio_device: Choice,
     midi_input: Choice,
     font: Frame,
     looping: CheckButton,
@@ -252,7 +256,7 @@ impl Ui {
             ("Track/Add Track", None, Action::AddTrack),
             ("Track/Remove Track", None, Action::RemoveTrack),
             ("Playback/Load SoundFont…", None, Action::LoadFont),
-            ("Playback/Refresh MIDI Devices", None, Action::Refresh),
+            ("Playback/Refresh Devices", None, Action::Refresh),
         ] {
             menu_item(&mut menu, path, key, tx, action);
         }
@@ -271,7 +275,7 @@ impl Ui {
         let mut output = Choice::new(468, 43, 241, 29, None);
         output.add_choice("Software SoundFont");
         output.set_value(0);
-        output.emit(tx, Action::Stop);
+        output.emit(tx, Action::OutputChanged);
         button(718, 43, 114, "Load SF2…", tx, Action::LoadFont);
         let font = flat_label(844, 43, 174, 29, "Choose an SF2 file", 12, SUBTLE);
         let clock = flat_label(1030, 43, 115, 29, "00:00.0", 17, ACCENT);
@@ -409,10 +413,16 @@ impl Ui {
         midi_input.set_tooltip("Choose a MIDI input, then press Record.");
         let mut record = button(1039, 83, 125, "Record MIDI", tx, Action::Record);
         record.set_tooltip("Start a new MIDI take. Press Stop to keep it.");
+        flat_label(808, 681, 99, 27, "Audio device", 13, SUBTLE);
+        let mut audio_device = Choice::new(908, 681, 256, 29, None);
+        audio_device.add_choice("System default");
+        audio_device.set_value(0);
+        audio_device.set_tooltip("Audio destination for the software SoundFont synthesizer.");
+        audio_device.emit(tx, Action::OutputChanged);
         let status = flat_label(
             16,
             682,
-            WIDTH - 32,
+            780,
             32,
             "Click to add or select a note • Drag to move • Right-click to delete",
             13,
@@ -437,6 +447,7 @@ impl Ui {
             solo,
             bpm,
             output,
+            audio_device,
             midi_input,
             font,
             looping,
@@ -564,6 +575,35 @@ impl Ui {
         }
         let index = prior.and_then(|name| model.outputs.iter().position(|port| port.name == name));
         self.output.set_value(index.map_or(0, |i| i as i32 + 1));
+        let selected = self.audio_device.value();
+        let prior = if selected > 0 {
+            model
+                .sound_devices
+                .get((selected - 1) as usize)
+                .map(|port| port.name.clone())
+        } else {
+            None
+        };
+        model.sound_devices = audio::sound_devices().unwrap_or_default();
+        self.audio_device.clear();
+        self.audio_device.add_choice("System default");
+        for device in &model.sound_devices {
+            let name = menu_label(&device.name);
+            let name = if audio::is_sound_blaster(&name) {
+                format!("Sound Blaster · {name}")
+            } else {
+                name
+            };
+            self.audio_device.add_choice(&name);
+        }
+        let index = prior.and_then(|name| {
+            model
+                .sound_devices
+                .iter()
+                .position(|device| device.name == name)
+        });
+        self.audio_device
+            .set_value(index.map_or(0, |i| i as i32 + 1));
         let prior = model
             .inputs
             .get(self.midi_input.value().saturating_sub(1) as usize)
@@ -766,7 +806,10 @@ fn apply(
     background: &std::sync::mpsc::Sender<String>,
 ) -> song::Result<bool> {
     if model.recording.is_some()
-        && !matches!(action, Action::Stop | Action::View | Action::SelectTrack)
+        && !matches!(
+            action,
+            Action::Stop | Action::OutputChanged | Action::View | Action::SelectTrack
+        )
     {
         return Err("Press Stop to finish the MIDI take first.".into());
     }
@@ -968,18 +1011,31 @@ fn apply(
                     .font
                     .as_ref()
                     .ok_or("Choose Load SF2 to load a SoundFont, or select a MIDI output.")?;
-                audio::Playback::software(font, timeline, looping)?
+                let index = ui.audio_device.value();
+                let device = if index > 0 {
+                    model.sound_devices.get((index - 1) as usize)
+                } else {
+                    None
+                };
+                audio::Playback::software(font, timeline, looping, device)?
             });
             ui.status.set_label("Playing");
         }
         Action::Record => {
             let port = ui.midi_input.value().checked_sub(1).and_then(|index| model.inputs.get(index as usize))
-                .ok_or("Choose a MIDI input at the bottom right. Use Playback → Refresh MIDI Devices if needed.")?;
+                .ok_or("Choose a MIDI input at the bottom right. Use Playback → Refresh Devices if needed.")?;
             model.playback = None;
             model.captured.clear();
             model.recording = Some(recording::Recording::start(&port.port)?);
             ui.status
                 .set_label("Recording MIDI from the start. Press Stop to keep the take.");
+        }
+        Action::OutputChanged => {
+            if model.playback.take().is_some() {
+                ui.clock.set_label("00:00.0");
+                ui.status
+                    .set_label("Playback stopped after changing the output.");
+            }
         }
         Action::Stop => {
             if let Some(recording) = model.recording.take() {

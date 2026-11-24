@@ -5,7 +5,7 @@ Nu Digi Orch is a lightweight desktop MIDI composer in Rust and FLTK. It combine
 ## Start composing
 
 1. Open a MIDI file with **File → Open MIDI**, or open the built-in two-track song with **File → Open Demo**.
-2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system's default audio device. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
+2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system default or a device selected in **Audio device**. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
 3. Press **Play** or activate **Loop** before playback. To send MIDI to hardware or another application, select its port in **Output**.
 4. Click the piano roll to add or select a note. Drag a note to move it in pitch and time. Right-click or press Delete with the roll focused to remove a note. The note fields below the roll set exact tick position, pitch, duration, and velocity. **Snap** controls the edit grid, and **New length** controls the duration of newly drawn notes.
 5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in **Track settings**. Channel 10 is percussion in General MIDI. With an SF2 loaded, you can also choose a named preset. Tracks sharing a MIDI channel share its patch and controllers. Mute and Solo control playback and WAV export for the current session.
@@ -16,7 +16,7 @@ For longer songs, set **First beat** to move horizontally and **Top key** to cha
 
 ## Sound Blaster and MIDI routing
 
-The **Output** list uses the operating system's MIDI API (WinMM, ALSA sequencer, or CoreMIDI). Ports whose names contain common Creative/Sound Blaster identifiers are labeled **Sound Blaster**. **Playback → Refresh MIDI Devices** rescans after connecting hardware. A card or driver must expose a MIDI port to appear in the list. If a card exposes audio output only, set it as the system's default audio device and select **Software SoundFont**.
+The **Output** list uses the operating system's MIDI API (WinMM, ALSA sequencer, or CoreMIDI). Ports whose names contain common Creative/Sound Blaster identifiers are labeled **Sound Blaster**. **Playback → Refresh Devices** rescans after connecting hardware. A card or driver must expose a MIDI port to appear in the list. If a card exposes audio output only, choose it under **Audio device** and select **Software SoundFont**. Devices whose audio driver name matches a Sound Blaster identifier are labeled there too.
 
 SF2 banks are loaded into the internal software synthesizer. To use an onboard hardware synth, configure its bank with its driver or vendor utility, then choose the MIDI port in Nu Digi Orch. A virtual MIDI port can route events to another application. The app's internal software synth works without a virtual MIDI port.
 

@@ -26,24 +26,46 @@ pub fn outputs() -> Result<Vec<Output>> {
         .into_iter()
         .filter_map(|port| {
             let name = midi.port_name(&port).ok()?;
-            let lower = name.to_ascii_lowercase();
-            let sound_blaster = [
-                "sound blaster",
-                "soundblaster",
-                "sb live",
-                "soundfont",
-                "audigy",
-                "emu10k",
-                "awe32",
-                "awe64",
-            ]
-            .iter()
-            .any(|term| lower.contains(term));
+            let sound_blaster = is_sound_blaster(&name);
             Some(Output {
                 port,
                 name,
                 sound_blaster,
             })
+        })
+        .collect())
+}
+
+pub fn is_sound_blaster(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "sound blaster",
+        "soundblaster",
+        "sb live",
+        "sblive",
+        "soundfont",
+        "audigy",
+        "emu10k",
+        "awe32",
+        "awe64",
+        "ca0106",
+        "creative technology",
+    ]
+    .iter()
+    .any(|term| name.contains(term))
+}
+
+pub struct SoundDevice {
+    pub device: cpal::Device,
+    pub name: String,
+}
+
+pub fn sound_devices() -> Result<Vec<SoundDevice>> {
+    Ok(cpal::default_host()
+        .output_devices()?
+        .filter_map(|device| {
+            let name = device.name().ok()?;
+            Some(SoundDevice { device, name })
         })
         .collect())
 }
@@ -169,11 +191,22 @@ impl Renderer {
 }
 
 impl Playback {
-    pub fn software(font: &Arc<SoundFont>, timeline: Timeline, looping: bool) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("No default audio output is available.")?;
+    pub fn software(
+        font: &Arc<SoundFont>,
+        timeline: Timeline,
+        looping: bool,
+        output: Option<&SoundDevice>,
+    ) -> Result<Self> {
+        let default;
+        let device = match output {
+            Some(output) => &output.device,
+            None => {
+                default = cpal::default_host()
+                    .default_output_device()
+                    .ok_or("No default audio output is available.")?;
+                &default
+            }
+        };
         let config = device.default_output_config()?;
         let mut renderer = Renderer::new(font, timeline, config.sample_rate().0, looping)?;
         let progress = Arc::new(Progress::default());
@@ -223,6 +256,13 @@ impl Playback {
         }
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => make_stream!(f32),
+            cpal::SampleFormat::F64 => make_stream!(f64),
+            cpal::SampleFormat::I8 => make_stream!(i8),
+            cpal::SampleFormat::I32 => make_stream!(i32),
+            cpal::SampleFormat::I64 => make_stream!(i64),
+            cpal::SampleFormat::U8 => make_stream!(u8),
+            cpal::SampleFormat::U32 => make_stream!(u32),
+            cpal::SampleFormat::U64 => make_stream!(u64),
             cpal::SampleFormat::I16 => make_stream!(i16),
             cpal::SampleFormat::U16 => make_stream!(u16),
             format => return Err(format!("Unsupported audio sample format: {format}").into()),
