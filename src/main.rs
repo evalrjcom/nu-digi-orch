@@ -308,20 +308,27 @@ impl Ui {
         button(65, 43, 45, "@square", tx, Action::Stop).set_tooltip("Stop");
         play.set_tooltip("Play");
         let looping = fltk::button::ToggleButton::new(165, 43, 68, 29, "Loop");
-        flat_label(239, 43, 40, 29, "BPM", 13, SUBTLE);
-        let mut bpm = Input::new(277, 44, 61, 26, None);
+        let clock = flat_label(246, 43, 100, 29, "00:00.0", 17, ACCENT);
+        flat_label(355, 43, 40, 29, "BPM", 13, SUBTLE);
+        let mut bpm = Input::new(398, 43, 70, 30, None);
         bpm.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
         bpm.emit(tx, Action::Tempo);
-        button(340, 43, 26, "−", tx, Action::TempoStep(-1));
-        button(368, 43, 26, "+", tx, Action::TempoStep(1));
-        flat_label(414, 43, 53, 29, "Output", 13, SUBTLE);
-        let mut output = Choice::new(468, 43, 241, 29, None);
+        for (y, symbol, step, hint) in [
+            (43, "@8>", 1, "Increase tempo by 1 BPM"),
+            (58, "@2>", -1, "Decrease tempo by 1 BPM"),
+        ] {
+            let mut arrow = fltk::button::RepeatButton::new(469, y, 25, 15, symbol);
+            arrow.set_label_size(9);
+            arrow.set_tooltip(hint);
+            arrow.emit(tx, Action::TempoStep(step));
+        }
+        flat_label(517, 43, 53, 29, "Output", 13, SUBTLE);
+        let mut output = Choice::new(571, 43, 241, 29, None);
         output.add_choice("Software SoundFont");
         output.set_value(0);
         output.emit(tx, Action::OutputChanged);
-        button(718, 43, 114, "Load SF2…", tx, Action::LoadFont);
-        let font = flat_label(844, 43, 174, 29, "Choose an SF2 file", 12, SUBTLE);
-        let clock = flat_label(1030, 43, 115, 29, "00:00.0", 17, ACCENT);
+        button(821, 43, 114, "Load SF2…", tx, Action::LoadFont);
+        let font = flat_label(947, 43, 174, 29, "Choose an SF2 file", 12, SUBTLE);
 
         flat_label(16, 85, 37, 25, "View", 13, SUBTLE);
         button(232, 83, 68, "+ Track", tx, Action::AddTrack);
@@ -505,7 +512,7 @@ impl Ui {
         win.resize_callback(move |_, _, _, w, h| {
             for (widget, (x, y, width, height)) in &anchored {
                 let mut widget = widget.clone();
-                let right = (*y == 681 && *x >= 613) || (*y == 43 && *x >= 1030);
+                let right = *y == 681 && *x >= 613;
                 let px = if right { x + w - WIDTH } else { *x };
                 let py = if *y >= 631 { y + h - HEIGHT } else { *y };
                 widget.resize(px, py, if *y == 0 { w } else { *width }, *height);
