@@ -58,3 +58,7 @@ nu-digi-orch --render demo.mid GeneralMIDI.sf2 demo.wav
 ```
 
 The project format is Standard MIDI File 0 or 1 with ticks-per-quarter timing. Tempo changes, MIDI channel events, and MIDI metadata are retained when saving. SysEx and escape events are preserved in MIDI files. Playback and WAV rendering process channel messages and the tempo map. SoundFonts are supplied separately.
+
+## SoundFont effects
+
+Open **Playback → SoundFont effects** to adjust the master reverb, chorus and stereo feedback delay during playback. Each slider runs from 0 to 100%. The settings apply to the software synth and GUI WAV exports for this session. WAV export captures the current settings and allows an extra three seconds for wet tails. External MIDI devices use their own audio processing.

@@ -117,6 +117,8 @@ impl Drop for Playback {
 }
 
 struct Renderer {
+    rack: crate::effects::Rack,
+    levels: Arc<crate::effects::Levels>,
     synth: Synthesizer,
     timeline: Timeline,
     index: usize,
@@ -133,13 +135,21 @@ fn frames(micros: u64, rate: u32) -> u64 {
 }
 
 impl Renderer {
-    fn new(font: &Arc<SoundFont>, timeline: Timeline, rate: u32, looping: bool) -> Result<Self> {
+    fn new(
+        font: &Arc<SoundFont>,
+        timeline: Timeline,
+        rate: u32,
+        looping: bool,
+        levels: Arc<crate::effects::Levels>,
+    ) -> Result<Self> {
         let mut settings = SynthesizerSettings::new(rate as i32);
         settings.block_size = 32;
         let synth = Synthesizer::new(font, &settings)?;
         // A sub-sample loop still needs one frame to make progress in the callback.
         let release_frame = frames(timeline.duration, rate).max(1);
         Ok(Self {
+            rack: crate::effects::Rack::new(rate),
+            levels,
             synth,
             timeline,
             index: 0,
@@ -192,6 +202,7 @@ impl Renderer {
             let (out_left, rest_left) = left.split_at_mut(count);
             let (out_right, rest_right) = right.split_at_mut(count);
             self.synth.render(out_left, out_right);
+            self.rack.process(out_left, out_right, self.levels.get());
             self.frame += count as u64;
             left = rest_left;
             right = rest_right;
@@ -205,6 +216,7 @@ impl Playback {
         timeline: Timeline,
         looping: bool,
         output: Option<&SoundDevice>,
+        levels: Arc<crate::effects::Levels>,
     ) -> Result<Self> {
         let default;
         let device = match output {
@@ -217,7 +229,7 @@ impl Playback {
             }
         };
         let config = device.default_output_config()?;
-        let mut renderer = Renderer::new(font, timeline, config.sample_rate().0, looping)?;
+        let mut renderer = Renderer::new(font, timeline, config.sample_rate().0, looping, levels)?;
         let progress = Arc::new(Progress::default());
         let channels = usize::from(config.channels());
         let (error_tx, errors) = std::sync::mpsc::channel();
@@ -412,9 +424,18 @@ impl Playback {
     }
 }
 
-pub fn export_wav(path: &Path, font: &Arc<SoundFont>, timeline: Timeline) -> Result<()> {
+pub fn export_wav(
+    path: &Path,
+    font: &Arc<SoundFont>,
+    timeline: Timeline,
+    levels: Arc<crate::effects::Levels>,
+) -> Result<()> {
     let rate = 44_100;
-    let mut renderer = Renderer::new(font, timeline, rate, false)?;
+    let wet = levels.get() != [0, 0, 0];
+    let mut renderer = Renderer::new(font, timeline, rate, false, levels)?;
+    if wet {
+        renderer.end_frame += u64::from(rate) * 3;
+    }
     if renderer.end_frame > u64::from((u32::MAX - 64) / 4) {
         return Err("The arrangement is too long for a stereo 16-bit WAV file.".into());
     }

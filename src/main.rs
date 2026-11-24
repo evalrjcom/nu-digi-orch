@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod effects;
 mod mixer;
 mod recording;
 mod song;
@@ -62,6 +63,7 @@ enum Action {
     Tempo,
     View,
     ToggleEditor,
+    Effects,
     MixerValue(usize, usize, u8),
     Seek(Tick),
     Step(usize, usize, i16),
@@ -82,6 +84,7 @@ enum Action {
 }
 
 struct Model {
+    effects: Arc<effects::Levels>,
     song: Song,
     track: usize,
     notes: Vec<Note>,
@@ -118,6 +121,7 @@ impl Model {
         let song = Song::new();
         Self {
             step: u64::from(song.ppq) / 4,
+            effects: Arc::default(),
             tick_at_time: Box::new(song.tempo_clock()),
             track_view: true,
             mixer: false,
@@ -243,6 +247,7 @@ fn menu_item(
 }
 
 struct Ui {
+    effects: Window,
     win: Window,
     arrangement: Frame,
     preset: Choice,
@@ -296,6 +301,7 @@ impl Ui {
             ("Edit/Quantize Selected Note", None, Action::SnapNote),
             ("Track/Add Track", None, Action::AddTrack),
             ("Track/Remove Track", None, Action::RemoveTrack),
+            ("Playback/SoundFont effects…", None, Action::Effects),
             ("Playback/Load SoundFont…", None, Action::LoadFont),
             ("Playback/Refresh Devices", None, Action::Refresh),
         ] {
@@ -531,7 +537,25 @@ impl Ui {
             grid.resize(16, 120 + split, w - 32, (height - split).max(1));
         });
         win.set_callback(move |_| tx.send(Action::Quit));
+        let mut effects = Window::new(180, 160, 400, 188, "SoundFont effects");
+        effects.set_color(BG);
+        for (index, label) in ["Reverb", "Chorus", "Delay"].into_iter().enumerate() {
+            let y = 14 + index as i32 * 56;
+            flat_label(16, y, 75, 32, label, 14, TEXT);
+            let mut slider = fltk::valuator::HorNiceSlider::new(96, y, 234, 32, None);
+            slider.set_bounds(0., 100.);
+            slider.set_step(1., 1);
+            let mut readout = flat_label(342, y, 52, 32, "0%", 14, ACCENT);
+            let levels = model.borrow().effects.clone();
+            slider.set_callback(move |s| {
+                let amount = s.value().round() as u8;
+                levels.set(index, amount);
+                readout.set_label(&format!("{amount}%"));
+            });
+        }
+        effects.end();
         Self {
+            effects,
             win,
             arrangement,
             preset,
@@ -1051,6 +1075,9 @@ fn apply(
         return Err("Press Stop to finish the MIDI take first.".into());
     }
     match action {
+        Action::Effects => {
+            ui.effects.show();
+        }
         Action::ToggleEditor => {
             model.mixer = ui.toggle_editor.value() == 3;
             model.tracks_only = model.mixer || ui.toggle_editor.value() == 1;
@@ -1125,12 +1152,13 @@ fn apply(
                     .ok_or("Load an SF2 SoundFont before exporting WAV.")?,
             );
             if let Some(path) = browse_save("Export WAV", "Wave audio\t*.wav", "wav") {
+                let levels = Arc::new(model.effects.snapshot());
                 let timeline = model.song.timeline();
                 let background = background.clone();
                 std::thread::Builder::new()
                     .name("wav-export".into())
                     .spawn(move || {
-                        let status = match audio::export_wav(&path, &font, timeline) {
+                        let status = match audio::export_wav(&path, &font, timeline, levels) {
                             Ok(()) => format!("Exported {}", path.display()),
                             Err(error) => format!("Could not export WAV: {error}"),
                         };
@@ -1348,7 +1376,7 @@ fn apply(
                 } else {
                     None
                 };
-                audio::Playback::software(font, timeline, looping, device)?
+                audio::Playback::software(font, timeline, looping, device, model.effects.clone())?
             });
             model.playhead = model.cue;
             ui.status.set_label("Playing");
@@ -1627,7 +1655,7 @@ fn run_command(arguments: &[OsString]) -> song::Result<()> {
         [command, input, font, output] if command == "--render" => {
             let song = Song::open(Path::new(input))?;
             let font = audio::load_font(Path::new(font))?;
-            audio::export_wav(Path::new(output), &font, song.timeline())
+            audio::export_wav(Path::new(output), &font, song.timeline(), Arc::default())
         }
         _ => Err("Invalid command. Run with --help for usage.".into()),
     }
