@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) const GUTTER: i32 = 388;
-const LANE: i32 = 24;
+const LANE: i32 = 29;
 
 const OFFSETS: [i32; 10] = [0, 29, 149, 181, 228, 271, 312, 350, 369, GUTTER];
 pub(super) const HEADERS: [&str; 9] = ["#", "Name", "Ch", "Prog", "Bank", "Vol", "Pan", "M", "S"];
@@ -151,6 +151,15 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
         };
         draw::draw_rect_fill(x, top, w, LANE - 1, fill);
         draw::set_draw_color(TEXT);
+        let colors = [
+            ACCENT,
+            Color::from_rgb(125, 169, 247),
+            Color::from_rgb(203, 152, 230),
+            Color::from_rgb(242, 177, 107),
+        ];
+        let color = colors[index % colors.len()];
+        draw::draw_rect_fill(x, top, 3, LANE - 1, color);
+        draw::set_draw_color(TEXT);
         cells(x, top, values(index, track));
         for right in &OFFSETS[3..=7] {
             let cx = x + right - 6;
@@ -160,7 +169,7 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
         let ink = if track.mute || (solo && !track.solo) {
             SUBTLE
         } else {
-            ACCENT
+            color
         };
         for note in &model.lanes[index] {
             let stop = note.end.max(note.start + 1);

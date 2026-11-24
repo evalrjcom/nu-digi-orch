@@ -263,6 +263,8 @@ struct Ui {
     velocity: IntInput,
     grid: Frame,
     toggle_editor: Choice,
+    piano_tools: Vec<fltk::widget::Widget>,
+    navigation_tools: Vec<fltk::widget::Widget>,
 
     status: Frame,
     clock: Frame,
@@ -270,13 +272,13 @@ struct Ui {
 
 impl Ui {
     fn new(tx: app::Sender<Action>, model: &Rc<RefCell<Model>>) -> Self {
-        app::set_scheme(app::Scheme::Gtk);
+        app::set_scheme(app::Scheme::Gleam);
         app::background(36, 44, 60);
         app::background2(25, 32, 47);
         app::foreground(229, 236, 246);
         let mut win = Window::new(80, 55, WIDTH, HEIGHT, "Nu Digi Orch");
         win.set_color(BG);
-        win.size_range(1000, 690, 0, 0);
+        win.size_range(1160, 690, 0, 0);
 
         let mut menu = MenuBar::new(0, 0, WIDTH, 30, None);
         menu.set_color(PANEL);
@@ -321,29 +323,29 @@ impl Ui {
         let font = flat_label(844, 43, 174, 29, "Choose an SF2 file", 12, SUBTLE);
         let clock = flat_label(1030, 43, 115, 29, "00:00.0", 17, ACCENT);
 
-        flat_label(16, 83, 100, 27, "Tracks", 16, TEXT);
-        button(125, 83, 49, "+", tx, Action::AddTrack);
-        button(181, 83, 50, "−", tx, Action::RemoveTrack);
+        flat_label(16, 85, 37, 25, "View", 13, SUBTLE);
+        button(232, 83, 68, "+ Track", tx, Action::AddTrack);
+        button(306, 83, 32, "−", tx, Action::RemoveTrack).set_tooltip("Remove selected track");
         let mut preset = Choice::new(16, 633, 215, 29, None);
         preset.add_choice("SoundFont presets…");
         preset.set_value(0);
         preset.emit(tx, Action::Preset);
-        flat_label(249, 85, 81, 25, "First beat", 13, SUBTLE);
-        let mut beat = number(323, 85, 65, 1);
-        flat_label(406, 85, 66, 25, "Top key", 13, SUBTLE);
-        let mut pitch = number(472, 85, 56, 83);
+        let first_label = flat_label(362, 85, 66, 25, "First beat", 13, SUBTLE);
+        let mut beat = number(428, 85, 62, 1);
+        let pitch_label = flat_label(574, 85, 62, 25, "Top key", 13, SUBTLE);
+        let mut pitch = number(636, 85, 50, 83);
         for field in [&mut beat, &mut pitch] {
             field.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
             field.emit(tx, Action::View);
         }
-        button(536, 83, 50, "Go", tx, Action::View);
-        flat_label(605, 85, 42, 25, "Snap", 13, SUBTLE);
-        let mut snap = Choice::new(647, 84, 93, 28, None);
+        let go = button(496, 83, 48, "Go", tx, Action::View);
+        let snap_label = flat_label(710, 85, 42, 25, "Snap", 13, SUBTLE);
+        let mut snap = Choice::new(752, 84, 93, 28, None);
         snap.add_choice("Quarter|Eighth|16th|32nd");
         snap.set_value(2);
         snap.emit(tx, Action::View);
-        flat_label(756, 85, 77, 25, "New length", 13, SUBTLE);
-        let mut length = Choice::new(834, 84, 93, 28, None);
+        let length_label = flat_label(872, 85, 77, 25, "New length", 13, SUBTLE);
+        let mut length = Choice::new(951, 84, 93, 28, None);
         length.add_choice("Quarter|Eighth|16th|32nd");
         length.set_value(2);
 
@@ -426,22 +428,22 @@ impl Ui {
                 _ => false,
             }
         });
-        flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE);
+        let start_label = flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE);
         let start = number(323, 633, 75, 0);
-        flat_label(412, 634, 28, 24, "Key", 13, SUBTLE);
+        let key_label = flat_label(412, 634, 28, 24, "Key", 13, SUBTLE);
         let key = number(445, 633, 49, 60);
-        flat_label(510, 634, 84, 24, "Length ticks", 13, SUBTLE);
+        let duration_label = flat_label(510, 634, 84, 24, "Length ticks", 13, SUBTLE);
         let duration = number(593, 633, 70, 120);
-        flat_label(680, 634, 55, 24, "Velocity", 13, SUBTLE);
+        let velocity_label = flat_label(680, 634, 55, 24, "Velocity", 13, SUBTLE);
         let velocity = number(741, 633, 51, 96);
-        button(808, 631, 62, "Apply", tx, Action::ApplyNote);
-        button(879, 631, 76, "Quantize", tx, Action::SnapNote);
-        button(964, 631, 66, "Delete", tx, Action::DeleteNote);
-        let mut toggle_editor = Choice::new(938, 83, 226, 29, None);
+        let apply_note = button(808, 631, 62, "Apply", tx, Action::ApplyNote);
+        let quantize = button(879, 631, 76, "Quantize", tx, Action::SnapNote);
+        let delete = button(964, 631, 66, "Delete", tx, Action::DeleteNote);
+        let mut toggle_editor = Choice::new(55, 83, 158, 29, None);
         toggle_editor.add_choice("Split view|Full track view|Full piano roll|Track mixer");
         toggle_editor.set_value(0);
         toggle_editor.emit(tx, Action::ToggleEditor);
-        let mut midi_input = Choice::new(1045, 632, 119, 28, None);
+        let mut midi_input = Choice::new(613, 681, 171, 28, None);
         midi_input.add_choice("MIDI input…");
         midi_input.set_value(0);
         midi_input.set_tooltip("Choose a MIDI input, then press Record.");
@@ -457,18 +459,57 @@ impl Ui {
         let status = flat_label(
             16,
             682,
-            780,
+            570,
             32,
             "Select a track or double-click a lane to edit its notes.",
             13,
             SUBTLE,
         );
 
+        let piano_tools = vec![
+            pitch_label.as_base_widget(),
+            pitch.as_base_widget(),
+            snap_label.as_base_widget(),
+            snap.as_base_widget(),
+            length_label.as_base_widget(),
+            length.as_base_widget(),
+            start_label.as_base_widget(),
+            start.as_base_widget(),
+            key_label.as_base_widget(),
+            key.as_base_widget(),
+            duration_label.as_base_widget(),
+            duration.as_base_widget(),
+            velocity_label.as_base_widget(),
+            velocity.as_base_widget(),
+            apply_note.as_base_widget(),
+            quantize.as_base_widget(),
+            delete.as_base_widget(),
+        ];
+        let navigation_tools = vec![
+            first_label.as_base_widget(),
+            beat.as_base_widget(),
+            go.as_base_widget(),
+        ];
         win.end();
+        // Keep controls at native size; only the editor expands across a wide window.
+        let anchored: Vec<_> = (0..win.children())
+            .filter_map(|i| win.child(i))
+            .map(|widget| {
+                let bounds = (widget.x(), widget.y(), widget.w(), widget.h());
+                (widget, bounds)
+            })
+            .collect();
         win.resizable(&grid);
         let layout_grid = grid.clone();
         let layout_tracks = arrangement.clone();
         win.resize_callback(move |_, _, _, w, h| {
+            for (widget, (x, y, width, height)) in &anchored {
+                let mut widget = widget.clone();
+                let right = (*y == 681 && *x >= 613) || (*y == 43 && *x >= 1030);
+                let px = if right { x + w - WIDTH } else { *x };
+                let py = if *y >= 631 { y + h - HEIGHT } else { *y };
+                widget.resize(px, py, if *y == 0 { w } else { *width }, *height);
+            }
             let mut grid = layout_grid.clone();
             let mut tracks = layout_tracks.clone();
             let height = h - 228;
@@ -504,6 +545,8 @@ impl Ui {
             velocity,
             grid,
             toggle_editor,
+            navigation_tools,
+            piano_tools,
 
             status,
             clock,
@@ -571,6 +614,20 @@ impl Ui {
             self.grid.hide();
         } else {
             self.grid.show();
+        }
+        for tool in &mut self.piano_tools {
+            if model.tracks_only {
+                tool.hide()
+            } else {
+                tool.show()
+            }
+        }
+        for tool in &mut self.navigation_tools {
+            if model.mixer {
+                tool.hide()
+            } else {
+                tool.show()
+            }
         }
         self.toggle_editor.set_value(if model.mixer {
             3
