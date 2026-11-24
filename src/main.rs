@@ -36,7 +36,9 @@ use std::{
 const WIDTH: i32 = 1180;
 const HEIGHT: i32 = 730;
 const LABEL: i32 = 47;
-const RULER: i32 = 26;
+const CHORD_BAND: i32 = 21;
+const RULER: i32 = 26 + CHORD_BAND;
+const SCROLL: i32 = 16;
 const ROWS: i32 = 24;
 const BEATS: u64 = 16;
 const BG: Color = Color::from_rgb(20, 25, 36);
@@ -72,6 +74,11 @@ enum Action {
     Jump(i8),
     Tempo,
     View,
+    ScrollTime(u64),
+    ScrollTracks(usize),
+    ScrollPitch(u8),
+    ScrollMixer(usize),
+    ResizeScrollbars,
     ToggleEditor,
     BusValue(usize, usize, i16),
     MixPreset(bool, i8, i8, u8),
@@ -127,6 +134,12 @@ struct Model {
     export_in_progress: bool,
     inputs: Vec<recording::InputPort>,
     view_beat: Tick,
+    track_scroll: usize,
+    last_beat: Tick,
+    follow_playhead: bool,
+    mixer_scroll: usize,
+    chords: Vec<(Tick, Option<harmony::Chord>)>,
+    keys: Vec<(Tick, (i8, bool))>,
     track_view: bool,
     mixer: bool,
     tracks_only: bool,
@@ -182,6 +195,12 @@ impl Model {
             export_in_progress: false,
             inputs: Vec::new(),
             view_beat: 0,
+            track_scroll: 0,
+            last_beat: 0,
+            follow_playhead: true,
+            mixer_scroll: 0,
+            chords: Vec::new(),
+            keys: Vec::new(),
             high_key: 83,
         }
     }
@@ -224,6 +243,9 @@ impl Model {
         self.undo.clear();
         self.redo.clear();
         self.view_beat = 0;
+        self.follow_playhead = true;
+        self.track_scroll = 0;
+        self.mixer_scroll = 0;
         self.high_key = 83;
         self.fit_pitch();
     }
@@ -314,8 +336,10 @@ struct Ui {
     clock: Frame,
     chord: Frame,
     piano_dock: Button,
-    chords: Vec<(Tick, Option<harmony::Chord>)>,
-    keys: Vec<(Tick, (i8, bool))>,
+    time_scroll: fltk::valuator::Scrollbar,
+    track_scroll: fltk::valuator::Scrollbar,
+    pitch_scroll: fltk::valuator::Scrollbar,
+    mixer_scroll: fltk::valuator::Scrollbar,
 }
 
 impl Ui {
@@ -561,6 +585,13 @@ impl Ui {
                     }
                     true
                 }
+                Event::MouseWheel => {
+                    if let Ok(model) = handle_model.try_borrow() {
+                        let key = i32::from(model.high_key) - app::event_dy_value();
+                        tx.send(Action::ScrollPitch(key.clamp(ROWS - 1, 127) as u8));
+                    }
+                    true
+                }
                 Event::Focus | Event::Unfocus => true,
                 Event::KeyDown if app::event_key() == Key::Delete => {
                     tx.send(Action::DeleteNote);
@@ -640,6 +671,21 @@ impl Ui {
             beat.as_base_widget(),
             go.as_base_widget(),
         ];
+        use fltk::valuator::{Scrollbar, ScrollbarType};
+        let mut time_scroll = Scrollbar::new(16, 606, WIDTH - 32, SCROLL, None);
+        time_scroll.set_type(ScrollbarType::Horizontal);
+        time_scroll.set_callback(move |bar| tx.send(Action::ScrollTime(bar.value() as u64)));
+        time_scroll.set_linesize(1);
+        let mut track_scroll = Scrollbar::new(WIDTH - 32, 120, SCROLL, 220, None);
+        track_scroll.set_linesize(1);
+        track_scroll.set_callback(move |bar| tx.send(Action::ScrollTracks(bar.value() as usize)));
+        let mut pitch_scroll = Scrollbar::new(WIDTH - 32, 340, SCROLL, 266, None);
+        pitch_scroll.set_linesize(1);
+        pitch_scroll.set_callback(move |bar| tx.send(Action::ScrollPitch(127 - bar.value() as u8)));
+        let mut mixer_scroll = Scrollbar::new(16, 606, WIDTH - 32, SCROLL, None);
+        mixer_scroll.set_type(ScrollbarType::Horizontal);
+        mixer_scroll.set_linesize(1);
+        mixer_scroll.set_callback(move |bar| tx.send(Action::ScrollMixer(bar.value() as usize)));
         win.end();
         // Keep controls at native size; only the editor expands across a wide window.
         let anchored: Vec<_> = (0..win.children())
@@ -652,6 +698,13 @@ impl Ui {
         win.resizable(&grid);
         let layout_grid = grid.clone();
         let layout_tracks = arrangement.clone();
+        let (mut time_bar, mut track_bar, mut pitch_bar, mut mixer_bar) = (
+            time_scroll.clone(),
+            track_scroll.clone(),
+            pitch_scroll.clone(),
+            mixer_scroll.clone(),
+        );
+        let data = model.clone();
         win.resize_callback(move |_, _, _, w, h| {
             for (widget, (x, y, width, height)) in &anchored {
                 let mut widget = widget.clone();
@@ -662,7 +715,7 @@ impl Ui {
             }
             let mut grid = layout_grid.clone();
             let mut tracks = layout_tracks.clone();
-            let height = h - 228;
+            let height = h - 228 - SCROLL;
             let split = if !grid.visible() {
                 height
             } else if tracks.visible() {
@@ -670,8 +723,20 @@ impl Ui {
             } else {
                 0
             };
-            tracks.resize(16, 120, w - 32, split.max(1));
-            grid.resize(16, 120 + split, w - 32, (height - split).max(1));
+            let mixer = data.try_borrow().is_ok_and(|model| model.mixer);
+            let width = w - 32 - if mixer { 0 } else { SCROLL };
+            tracks.resize(16, 120, width, split.max(1));
+            grid.resize(16, 120 + split, width, (height - split).max(1));
+            time_bar.resize(16, 120 + height, width, SCROLL);
+            mixer_bar.resize(16, 120 + height, width, SCROLL);
+            track_bar.resize(16 + width, 120 + RULER, SCROLL, (split - RULER).max(1));
+            tx.send(Action::ResizeScrollbars);
+            pitch_bar.resize(
+                16 + width,
+                120 + split + RULER,
+                SCROLL,
+                (height - split - RULER).max(1),
+            );
         });
         win.set_callback(move |_| tx.send(Action::Quit));
         let mut effects = Window::new(180, 160, 400, 188, "SoundFont effects");
@@ -731,8 +796,10 @@ impl Ui {
             clock,
             chord,
             piano_dock,
-            chords: Vec::new(),
-            keys: Vec::new(),
+            time_scroll,
+            track_scroll,
+            pitch_scroll,
+            mixer_scroll,
         }
     }
 
@@ -776,8 +843,8 @@ impl Ui {
             model.notes = track.notes();
             model.lanes.clear();
         }
-        let width = self.win.w() - 32;
-        let height = self.win.h() - 228;
+        let width = self.win.w() - 32 - if model.mixer { 0 } else { SCROLL };
+        let height = self.win.h() - 228 - SCROLL;
         let split = if model.tracks_only {
             height
         } else if model.track_view {
@@ -798,6 +865,30 @@ impl Ui {
         } else {
             self.grid.show();
         }
+        self.time_scroll.resize(16, 120 + height, width, SCROLL);
+        self.mixer_scroll.resize(16, 120 + height, width, SCROLL);
+        self.track_scroll
+            .resize(16 + width, 120 + RULER, SCROLL, (split - RULER).max(1));
+        self.pitch_scroll.resize(
+            16 + width,
+            120 + split + RULER,
+            SCROLL,
+            (height - split - RULER).max(1),
+        );
+        for (bar, visible) in [
+            (&mut self.time_scroll, !model.mixer),
+            (&mut self.mixer_scroll, model.mixer),
+            (&mut self.track_scroll, model.track_view && !model.mixer),
+            (&mut self.pitch_scroll, !model.tracks_only),
+        ] {
+            if visible {
+                bar.show();
+            } else {
+                bar.hide();
+            }
+        }
+        model.last_beat = model.song.end_tick().div_ceil(u64::from(model.song.ppq));
+        self.sync_scrollbars(model);
         for tool in &mut self.piano_tools {
             if model.tracks_only {
                 tool.hide()
@@ -828,26 +919,59 @@ impl Ui {
                 .set_value(&(note.end - note.start).to_string());
             self.velocity.set_value(&note.velocity.to_string());
         }
-        self.chords = harmony::progression(&model.song);
-        self.keys = model.song.key_map();
+        model.chords = harmony::progression(&model.song);
+        model.keys = model.song.key_map();
         self.update_music_display(model);
         self.grid.redraw();
         self.arrangement.redraw();
     }
 
+    fn sync_scrollbars(&mut self, model: &Model) {
+        let max = model
+            .last_beat
+            .saturating_sub(BEATS)
+            .max(model.view_beat)
+            .min(i32::MAX as u64 - BEATS);
+        self.time_scroll.scroll_value(
+            model.view_beat.min(max) as i32,
+            BEATS as i32,
+            0,
+            (max + BEATS) as i32,
+        );
+        self.pitch_scroll
+            .scroll_value(i32::from(127 - model.high_key), ROWS, 0, 128);
+        let rows = track_view::visible_rows(&self.arrangement).min(model.song.tracks.len());
+        let strips = mixer::visible_strips(&self.arrangement).min(model.song.tracks.len());
+        let count = model.song.tracks.len();
+        self.track_scroll.scroll_value(
+            model.track_scroll.min(count - rows) as i32,
+            rows as i32,
+            0,
+            count as i32,
+        );
+        self.mixer_scroll.scroll_value(
+            model.mixer_scroll.min(count - strips) as i32,
+            strips as i32,
+            0,
+            count as i32,
+        );
+    }
+
     fn update_music_display(&mut self, model: &Model) {
-        let key = self
+        let key = model
             .keys
             .get(
-                self.keys
+                model
+                    .keys
                     .partition_point(|&(tick, _)| tick <= model.playhead)
                     .wrapping_sub(1),
             )
             .map(|entry| entry.1);
-        let chord = self
+        let chord = model
             .chords
             .get(
-                self.chords
+                model
+                    .chords
                     .partition_point(|&(tick, _)| tick <= model.playhead)
                     .wrapping_sub(1),
             )
@@ -889,9 +1013,11 @@ impl Ui {
         if tick != model.playhead {
             model.playhead = tick;
             let beat = tick / u64::from(model.song.ppq);
-            if beat < model.view_beat || beat >= model.view_beat + BEATS {
+            if model.follow_playhead && (beat < model.view_beat || beat >= model.view_beat + BEATS)
+            {
                 model.view_beat = beat / BEATS * BEATS;
                 self.beat.set_value(&(model.view_beat + 1).to_string());
+                self.sync_scrollbars(model);
             }
             self.grid.redraw();
             self.arrangement.redraw();
@@ -1111,9 +1237,9 @@ fn draw_grid(grid: &Frame, model: &Model) {
         draw::draw_text2(
             &(beat + 1).to_string(),
             line + 4,
-            y,
+            y + CHORD_BAND,
             48,
-            RULER,
+            RULER - CHORD_BAND,
             Align::Inside | Align::Left,
         );
     }
@@ -1148,6 +1274,7 @@ fn draw_grid(grid: &Frame, model: &Model) {
             color,
         );
     }
+    harmony::draw_ruler(grid, model, roll_gutter(model));
     draw::pop_clip();
 }
 
@@ -1320,6 +1447,11 @@ fn apply(
             action,
             Action::Stop
                 | Action::RecordBacking
+                | Action::ScrollTime(..)
+                | Action::ScrollTracks(..)
+                | Action::ScrollPitch(..)
+                | Action::ScrollMixer(..)
+                | Action::ResizeScrollbars
                 | Action::VirtualKeyboard
                 | Action::MetronomeChanged
                 | Action::OutputChanged
@@ -1595,6 +1727,8 @@ fn apply(
             model.checkpoint();
             model.song.add_track();
             model.track = model.song.tracks.len() - 1;
+            model.track_scroll = model.track;
+            model.mixer_scroll = model.track;
             model.selected = None;
         }
         Action::RemoveTrack => {
@@ -1758,6 +1892,14 @@ fn apply(
             live_edit(model, Vec::new(), true);
             model.selected = None;
         }
+        Action::ScrollTime(beat) => {
+            model.follow_playhead = false;
+            model.view_beat = beat;
+        }
+        Action::ScrollTracks(first) => model.track_scroll = first,
+        Action::ScrollPitch(key) => model.high_key = key.clamp(ROWS as u8 - 1, 127),
+        Action::ScrollMixer(first) => model.mixer_scroll = first,
+        Action::ResizeScrollbars => {}
         Action::View => {
             model.view_beat = number_value(&ui.beat, 1, 25_000_000)
                 .ok_or("First beat must be between 1 and 25,000,000.")?
@@ -1831,6 +1973,7 @@ fn apply(
             }
         }
         Action::Seek(tick) => {
+            model.follow_playhead = true;
             let playing = model.playback.take().is_some();
             model.cue = tick;
             model.jump_cue = None;
@@ -1840,6 +1983,7 @@ fn apply(
             }
         }
         Action::Play | Action::RecordBacking => {
+            model.follow_playhead = true;
             ui.last_stop = None;
             if let Some(playback) = &model.playback {
                 if playback.progress.paused.swap(false, Ordering::AcqRel) {
@@ -2279,7 +2423,20 @@ fn main() {
             let mut model = model.borrow_mut();
             match apply(action, &mut ui, &mut model, &background) {
                 Ok(false) => return,
-                Ok(true) => ui.sync(&mut model),
+                Ok(true) => match action {
+                    Action::ScrollTime(..)
+                    | Action::ScrollTracks(..)
+                    | Action::ScrollPitch(..)
+                    | Action::ScrollMixer(..)
+                    | Action::ResizeScrollbars => {
+                        ui.beat.set_value(&(model.view_beat + 1).to_string());
+                        ui.pitch.set_value(&model.high_key.to_string());
+                        ui.sync_scrollbars(&model);
+                        ui.grid.redraw();
+                        ui.arrangement.redraw();
+                    }
+                    _ => ui.sync(&mut model),
+                },
                 Err(error) => ui.status.set_label(&error.to_string()),
             }
         }

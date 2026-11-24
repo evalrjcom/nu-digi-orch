@@ -3,9 +3,16 @@ use super::*;
 const STRIP: i32 = 132;
 const CONTROL: Color = Color::from_rgb(54, 68, 86);
 
+pub(super) fn visible_strips(f: &Frame) -> usize {
+    (f.w() / STRIP - 1).max(1) as usize
+}
 fn page(f: &Frame, m: &Model) -> (usize, usize) {
-    let count = (f.w() / STRIP - 1).max(1) as usize;
-    (m.track / count * count, count)
+    let count = visible_strips(f);
+    (
+        m.mixer_scroll
+            .min(m.song.tracks.len().saturating_sub(count)),
+        count,
+    )
 }
 
 fn label(x: i32, y: i32, w: i32, h: i32, text: &str, color: Color) {
@@ -173,11 +180,10 @@ pub(super) fn handle(
     let bottom = f.h() - 60;
     match e {
         Event::MouseWheel => {
-            let i = m
-                .track
+            let index = first
                 .saturating_add_signed(app::event_dy_value() as isize)
-                .min(m.song.tracks.len() - 1);
-            tx.send(Action::Lane(i, false));
+                .min(m.song.tracks.len().saturating_sub(count));
+            tx.send(Action::ScrollMixer(index));
             return true;
         }
         Event::Released => {

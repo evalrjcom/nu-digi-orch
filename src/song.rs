@@ -550,6 +550,22 @@ impl Song {
             .map_or(500_000, |entry| entry.1)
     }
 
+    pub fn end_tick(&self) -> Tick {
+        self.tracks
+            .iter()
+            .map(|track| {
+                track
+                    .events
+                    .iter()
+                    .map(|(tick, _)| *tick)
+                    .max()
+                    .unwrap_or(0)
+                    .max(track.end)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn key_map(&self) -> Vec<(Tick, (i8, bool))> {
         let mut keys: Vec<_> = self
             .tracks

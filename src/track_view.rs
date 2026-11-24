@@ -43,9 +43,13 @@ fn cells(x: i32, y: i32, labels: impl IntoIterator<Item = impl AsRef<str>>) {
     }
 }
 
+pub(super) fn visible_rows(frame: &Frame) -> usize {
+    ((frame.h() - RULER) / LANE).max(1) as usize
+}
 fn first_lane(frame: &Frame, model: &Model) -> usize {
-    let rows = ((frame.h() - RULER) / LANE).max(1) as usize;
-    model.track / rows * rows
+    model
+        .track_scroll
+        .min(model.song.tracks.len().saturating_sub(visible_rows(frame)))
 }
 
 pub(super) fn seek_ruler(
@@ -85,11 +89,10 @@ pub(super) fn handle(frame: &Frame, model: &Model, event: Event, tx: app::Sender
             true
         }
         Event::MouseWheel => {
-            let index = model
-                .track
+            let first = first_lane(frame, model)
                 .saturating_add_signed(app::event_dy_value() as isize)
-                .min(model.song.tracks.len() - 1);
-            tx.send(Action::Lane(index, false));
+                .min(model.song.tracks.len().saturating_sub(visible_rows(frame)));
+            tx.send(Action::ScrollTracks(first));
             true
         }
         Event::Push if app::event_mouse_button() == MouseButton::Left => {
@@ -140,7 +143,7 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
     draw::draw_rect_fill(x, y, w, h, PANEL);
     draw::set_font(Font::Helvetica, 12);
     draw::set_draw_color(SUBTLE);
-    cells(x, y, HEADERS);
+    cells(x, y + CHORD_BAND, HEADERS);
     let first = first_lane(frame, model);
     let visible = ((h - RULER + LANE - 1) / LANE) as usize;
     let solo = model.song.tracks.iter().any(|track| track.solo);
@@ -204,12 +207,13 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
         draw::draw_text2(
             &(model.view_beat + beat + 1).to_string(),
             line + 3,
-            y,
+            y + CHORD_BAND,
             55,
-            RULER,
+            RULER - CHORD_BAND,
             Align::Inside | Align::Left,
         );
     }
+    harmony::draw_ruler(frame, model, GUTTER);
     draw::pop_clip();
 }
 

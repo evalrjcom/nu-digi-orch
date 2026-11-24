@@ -101,3 +101,10 @@ Choose **Playback → Count-in** for zero, one, or two bars before recording. Ch
 Click **Dock** on the virtual piano to hide it. The main window’s piano button shows whether the piano is docked during playback or recording. Click that button to bring the piano back. Existing hardware MIDI capture continues when the piano is docked.
 
 The box beside the clock displays a recognized chord and the explicit MIDI key signature at the playhead. Chords come from overlapping notes on audible melodic tracks. Use **Edit → Set key signature** at the playhead to save a major or minor key change, or **Edit → Transpose song** to shift all melodic notes and key signatures by a signed number of semitones. General MIDI drums keep their original pitches.
+
+
+## Scrollbars and chord ruler
+
+Drag the bottom timeline scrollbar to browse beats in Track View and Piano Roll together. Use the right-side scrollbars or the mouse wheel over each pane to browse tracks or pitches independently. The Mixer has a separate horizontal scrollbar for channel strips. Starting playback or seeking on the beat ruler restores automatic playhead following after manual timeline scrolling.
+
+The chord ruler above each beat ruler shows detected chord changes at their musical positions. A chord held into the visible range is shown at the left edge. The box beside the clock continues to show the chord at the current playhead.

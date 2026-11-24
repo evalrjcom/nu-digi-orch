@@ -118,6 +118,67 @@ pub fn progression(song: &Song) -> Vec<(Tick, Option<Chord>)> {
     result
 }
 
+// Draw each recognized change at its musical tick, including the chord carried into this page.
+pub(super) fn draw_ruler(frame: &super::Frame, model: &super::Model, gutter: i32) {
+    use fltk::{
+        draw,
+        enums::{Align, Font},
+        prelude::WidgetExt,
+    };
+    let left = frame.x() + gutter;
+    let width = frame.w() - gutter;
+    let top = frame.y();
+    let height = super::CHORD_BAND;
+    let ppq = u64::from(model.song.ppq);
+    let start = model.view_beat * ppq;
+    let span = super::BEATS * ppq;
+    let end = start + span;
+    let x_for = |tick| left + ((tick - start) * width as u64 / span) as i32;
+    draw::push_clip(left, top, width, height);
+    draw::draw_rect_fill(left, top, width, height, super::BG);
+    draw::set_font(Font::Helvetica, 12);
+    let first = model
+        .chords
+        .partition_point(|&(tick, _)| tick <= start)
+        .saturating_sub(1);
+    for (index, &(tick, chord)) in model
+        .chords
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take_while(|(_, entry)| entry.0 < end)
+    {
+        let Some(chord) = chord else {
+            continue;
+        };
+        let at = tick.max(start);
+        let x = x_for(at);
+        let next = model.chords[index + 1..]
+            .iter()
+            .find(|(_, next)| next.is_some())
+            .map_or(end, |entry| entry.0.min(end));
+        let room = x_for(next) - x;
+        if room < 10 {
+            continue;
+        }
+        let key_index = model.keys.partition_point(|&(at_key, _)| at_key <= at);
+        let flats = key_index
+            .checked_sub(1)
+            .is_some_and(|i| model.keys[i].1 .0 < 0);
+        draw::draw_rect_fill(x, top + 3, 1, height - 6, super::ACCENT);
+        draw::set_draw_color(super::ACCENT);
+        draw::draw_text2(
+            &chord.label(flats),
+            x + 3,
+            top,
+            room - 4,
+            height,
+            Align::Inside | Align::Left | Align::Clip,
+        );
+    }
+    draw::pop_clip();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
