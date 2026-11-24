@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod mixer;
 mod recording;
 mod song;
 mod track_view;
@@ -61,6 +62,7 @@ enum Action {
     Tempo,
     View,
     ToggleEditor,
+    MixerValue(usize, usize, u8),
     Seek(Tick),
     Step(usize, usize, i16),
     FocusCell(usize, usize),
@@ -98,6 +100,7 @@ struct Model {
     inputs: Vec<recording::InputPort>,
     view_beat: Tick,
     track_view: bool,
+    mixer: bool,
     tracks_only: bool,
     column: usize,
     cue: Tick,
@@ -117,6 +120,7 @@ impl Model {
             step: u64::from(song.ppq) / 4,
             tick_at_time: Box::new(song.tempo_clock()),
             track_view: true,
+            mixer: false,
             tracks_only: false,
             column: 2,
             cue: 0,
@@ -347,14 +351,24 @@ impl Ui {
         let data = Rc::clone(model);
         arrangement.draw(move |f| {
             if let Ok(m) = data.try_borrow() {
+                if m.mixer {
+                    mixer::paint(f, &m);
+                    return;
+                }
                 track_view::draw_tracks(f, &m);
                 track_view::draw_playhead(f, &m, track_view::GUTTER);
             }
         });
         let data = Rc::clone(model);
+        let mut mixer_drag = None;
         arrangement.handle(move |f, e| {
-            data.try_borrow()
-                .is_ok_and(|m| track_view::handle(f, &m, e, tx))
+            data.try_borrow().is_ok_and(|m| {
+                if m.mixer {
+                    mixer::handle(f, &m, e, tx, &mut mixer_drag)
+                } else {
+                    track_view::handle(f, &m, e, tx)
+                }
+            })
         });
         let mut grid = Frame::new(16, 350, WIDTH - 32, 272, None);
         grid.set_frame(FrameType::FlatBox);
@@ -424,7 +438,7 @@ impl Ui {
         button(879, 631, 76, "Quantize", tx, Action::SnapNote);
         button(964, 631, 66, "Delete", tx, Action::DeleteNote);
         let mut toggle_editor = Choice::new(938, 83, 226, 29, None);
-        toggle_editor.add_choice("Split view|Full track view|Full piano roll");
+        toggle_editor.add_choice("Split view|Full track view|Full piano roll|Track mixer");
         toggle_editor.set_value(0);
         toggle_editor.emit(tx, Action::ToggleEditor);
         let mut midi_input = Choice::new(1045, 632, 119, 28, None);
@@ -521,7 +535,10 @@ impl Ui {
         self.beat.set_value(&(model.view_beat + 1).to_string());
         self.pitch.set_value(&model.high_key.to_string());
         model.step = division(model.song.ppq, self.snap.value());
-        if model.track_view {
+        if model.mixer {
+            model.lanes.clear();
+            model.notes.clear();
+        } else if model.track_view {
             model.lanes = model
                 .song
                 .tracks
@@ -555,7 +572,9 @@ impl Ui {
         } else {
             self.grid.show();
         }
-        self.toggle_editor.set_value(if model.tracks_only {
+        self.toggle_editor.set_value(if model.mixer {
+            3
+        } else if model.tracks_only {
             1
         } else if model.track_view {
             0
@@ -969,9 +988,12 @@ fn apply(
     }
     match action {
         Action::ToggleEditor => {
-            model.tracks_only = ui.toggle_editor.value() == 1;
+            model.mixer = ui.toggle_editor.value() == 3;
+            model.tracks_only = model.mixer || ui.toggle_editor.value() == 1;
             model.track_view = ui.toggle_editor.value() != 2;
-            ui.status.set_label(if model.track_view {
+            ui.status.set_label(if model.mixer {
+                "Drag volume or pan. Scroll to reach more tracks."
+            } else if model.track_view {
                 "Select a track or double-click a lane to edit its notes."
             } else {
                 "Click to add or select a note • Drag to move • Right-click to delete"
@@ -1073,11 +1095,18 @@ fn apply(
             model.column = col;
             return apply(Action::Lane(index, false), ui, model, background);
         }
-        Action::Cell(index, col) | Action::Step(index, col, _) => {
+        Action::MixerValue(index, col, _)
+        | Action::Cell(index, col)
+        | Action::Step(index, col, _) => {
             let track = &model.song.tracks[index];
             model.column = col;
             let values = track_view::values(index, track);
-            let input = if let Action::Step(_, _, d) = action {
+            let input = if let Action::MixerValue(_, _, v) = action {
+                if values[col] == v.to_string() {
+                    return Ok(true);
+                }
+                v.to_string()
+            } else if let Action::Step(_, _, d) = action {
                 (values[col].parse::<i16>()? + d)
                     .clamp(
                         if col == 2 { 1 } else { 0 },

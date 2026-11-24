@@ -12,6 +12,10 @@ Choose **Full piano roll** or double-click an arrangement lane to expand the pia
 
 During playback and recording, the amber vertical line marks the current musical position in both views. It follows tempo changes, advances to the next 16-beat page, and returns to the beginning during loop playback.
 
+## Track mixer
+
+Choose **Track mixer** in the view selector. Each strip shows the track name, MIDI channel and program. Drag the vertical volume fader or horizontal pan slider, and click Mute or Solo while playing. Scroll over the mixer to reach additional tracks. Volume and pan use standard MIDI values from 0 to 127, with pan centered at 64. Tracks routed to the same MIDI channel share its controller values during playback.
+
 ## Start composing
 
 1. Open a MIDI file with **File → Open MIDI**, or open the built-in two-track song with **File → Open Demo**.
