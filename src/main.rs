@@ -146,6 +146,9 @@ impl Model {
     }
     fn checkpoint(&mut self) {
         self.playback = None;
+        self.save_undo();
+    }
+    fn save_undo(&mut self) {
         if self.undo.len() == 32 {
             self.undo.remove(0);
         }
@@ -879,6 +882,70 @@ fn discard_ok(model: &Model) -> bool {
             == Some(1)
 }
 
+fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
+    let Some(playback) = &model.playback else {
+        return;
+    };
+    let old_position = model.offset + playback.progress.position.load(Ordering::Relaxed);
+    let tick = (model.tick_at_time)(old_position);
+    let end_tick = (model.tick_at_time)(model.duration_micros);
+    let clock = model.song.tempo_clock();
+    let time_for = |tick| {
+        let mut lo = 0;
+        let mut hi = u64::MAX / 1_000_000;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if clock(mid) < tick {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        lo
+    };
+    let mut timeline = model.song.timeline();
+    // Keep transport running through silent sections, including when all tracks are muted.
+    timeline.duration = timeline.duration.max(time_for(end_tick));
+    model.duration_micros = timeline.duration;
+    model.offset = time_for(model.cue).min(timeline.duration.saturating_sub(1));
+    timeline.seek(model.offset);
+    let position = time_for(tick)
+        .saturating_sub(model.offset)
+        .min(timeline.duration);
+    let mut messages = messages;
+    if rebuild && position > 0 {
+        let mut chase = song::Timeline {
+            packets: timeline
+                .packets
+                .iter()
+                .copied()
+                .take_while(|p| p.micros < position)
+                .collect(),
+            duration: position,
+        };
+        chase.seek(position);
+        messages.extend(chase.packets);
+    }
+    model.tick_at_time = Box::new(clock);
+    let _ = playback.edits.send(audio::PlaybackEdit {
+        timeline,
+        messages,
+        reposition: rebuild.then_some(position),
+    });
+}
+
+fn mixer_message(channel: u8, controller: Option<u8>, value: u8) -> song::Packet {
+    let (bytes, len) = match controller {
+        Some(cc) => ([0xb0 | channel, cc, value], 3),
+        None => ([0xc0 | channel, value, 0], 2),
+    };
+    song::Packet {
+        micros: 0,
+        bytes,
+        len,
+    }
+}
+
 fn apply(
     action: Action,
     ui: &mut Ui,
@@ -1035,7 +1102,7 @@ fn apply(
             } else {
                 0
             };
-            model.checkpoint();
+            model.save_undo();
             model.track = index;
             model.selected = None;
             let track = &mut model.song.tracks[index];
@@ -1050,6 +1117,20 @@ fn apply(
                 8 => track.solo = !track.solo,
                 _ => {}
             }
+            let channel = track.channel;
+            let messages = match col {
+                3 => vec![mixer_message(channel, None, value)],
+                4 => vec![
+                    mixer_message(channel, Some(0), value),
+                    mixer_message(channel, None, track.setting(None)),
+                ],
+                5 => vec![mixer_message(channel, Some(7), value)],
+                6 => vec![mixer_message(channel, Some(10), value)],
+                _ => Vec::new(),
+            };
+            if col != 1 {
+                live_edit(model, messages, matches!(col, 2 | 7 | 8));
+            }
             model.fit_pitch();
         }
         Action::Preset => {
@@ -1063,11 +1144,19 @@ fn apply(
                     ui.sync(model);
                     return Err("For drum presets set track channel 10. Use another channel for melodic presets.".into());
                 }
-                model.checkpoint();
+                model.save_undo();
                 let track = &mut model.song.tracks[model.track];
                 track.set_setting(Some(0), (bank % 128) as u8);
                 track.set_setting(None, program as u8);
                 model.selected = None;
+                live_edit(
+                    model,
+                    vec![
+                        mixer_message(channel, Some(0), (bank % 128) as u8),
+                        mixer_message(channel, None, program as u8),
+                    ],
+                    false,
+                );
             }
         }
         Action::TempoStep(d) => {
@@ -1088,8 +1177,9 @@ fn apply(
             if !(4.0..=999.0).contains(&bpm) {
                 return Err("Tempo must be between 4 and 999 BPM.".into());
             }
-            model.checkpoint();
+            model.save_undo();
             model.song.set_tempo(bpm);
+            live_edit(model, Vec::new(), true);
             model.selected = None;
         }
         Action::View => {

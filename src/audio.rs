@@ -90,7 +90,15 @@ enum Backend {
     },
 }
 
+pub struct PlaybackEdit {
+    pub timeline: Timeline,
+    pub messages: Vec<Packet>,
+    // Routing or tempo changes need a fresh note/controller state at the same musical tick.
+    pub reposition: Option<u64>,
+}
+
 pub struct Playback {
+    pub edits: std::sync::mpsc::Sender<PlaybackEdit>,
     pub progress: Arc<Progress>,
     pub errors: std::sync::mpsc::Receiver<String>,
     backend: Backend,
@@ -212,6 +220,7 @@ impl Playback {
         let progress = Arc::new(Progress::default());
         let channels = usize::from(config.channels());
         let (error_tx, errors) = std::sync::mpsc::channel();
+        let (edits, updates) = std::sync::mpsc::channel::<PlaybackEdit>();
         let stream_config = config.config();
         macro_rules! make_stream {
             ($sample:ty) => {{
@@ -219,6 +228,34 @@ impl Playback {
                 device.build_output_stream(
                     &stream_config,
                     move |out: &mut [$sample], _| {
+                        for update in updates.try_iter() {
+                            if let Some(micros) = update.reposition {
+                                renderer.synth.reset();
+                                renderer.frame = frames(micros, renderer.rate);
+                                renderer.released = false;
+                            }
+                            for packet in update.messages {
+                                let [status, a, b] = packet.bytes.map(i32::from);
+                                renderer.synth.process_midi_message(
+                                    status & 15,
+                                    status & 0xf0,
+                                    a,
+                                    b,
+                                );
+                            }
+                            renderer.timeline = update.timeline;
+                            renderer.index = renderer.timeline.packets.partition_point(|p| {
+                                frames(p.micros, renderer.rate) < renderer.frame
+                            });
+                            renderer.release_frame =
+                                frames(renderer.timeline.duration, renderer.rate);
+                            renderer.end_frame = renderer.release_frame
+                                + if renderer.looping {
+                                    0
+                                } else {
+                                    u64::from(renderer.rate)
+                                };
+                        }
                         let mut left = [0.0; 256];
                         let mut right = [0.0; 256];
                         for chunk in out.chunks_mut(channels * 256) {
@@ -269,6 +306,7 @@ impl Playback {
         };
         stream.play()?;
         Ok(Self {
+            edits,
             progress,
             errors,
             backend: Backend::Software { _stream: stream },
@@ -284,6 +322,7 @@ impl Playback {
         let progress = Arc::new(Progress::default());
         let state = Arc::clone(&progress);
         let (error_tx, errors) = std::sync::mpsc::channel();
+        let (edits, updates) = std::sync::mpsc::channel::<PlaybackEdit>();
         let worker = thread::Builder::new()
             .name("midi-output".into())
             .spawn(move || {
@@ -298,40 +337,62 @@ impl Playback {
                         *used = false;
                     }
                 };
-                'play: loop {
-                    let start = Instant::now();
-                    let wait_until = |micros| {
-                        while !cancelled.load(Ordering::Relaxed) {
-                            let elapsed = start.elapsed().as_micros() as u64;
-                            state.position.store(elapsed, Ordering::Relaxed);
-                            if elapsed >= micros {
-                                return true;
+                let mut timeline = timeline;
+                let mut origin = Instant::now();
+                let mut offset = 0;
+                let mut index = 0;
+                'play: while !cancelled.load(Ordering::Relaxed) {
+                    let mut elapsed = offset + origin.elapsed().as_micros() as u64;
+                    for update in updates.try_iter() {
+                        if let Some(position) = update.reposition {
+                            silence(&mut connection, &mut active);
+                            offset = position;
+                            origin = Instant::now();
+                            elapsed = position;
+                        }
+                        for packet in update.messages {
+                            active[usize::from(packet.bytes[0] & 15)] = true;
+                            if let Err(err) = connection.send(&packet.bytes[..packet.len]) {
+                                let _ = error_tx.send(err.to_string());
+                                break 'play;
                             }
-                            thread::park_timeout(Duration::from_micros(
-                                (micros - elapsed).min(10_000),
-                            ));
                         }
-                        false
-                    };
-                    for Packet { micros, bytes, len } in &timeline.packets {
-                        if !wait_until(*micros) {
-                            break 'play;
-                        }
-                        active[usize::from(bytes[0] & 15)] = true;
-                        if let Err(err) = connection.send(&bytes[..*len]) {
+                        timeline = update.timeline;
+                        index = timeline.packets.partition_point(|p| p.micros < elapsed);
+                    }
+                    state.position.store(elapsed, Ordering::Relaxed);
+                    while let Some(p) = timeline.packets.get(index).filter(|p| p.micros <= elapsed)
+                    {
+                        active[usize::from(p.bytes[0] & 15)] = true;
+                        if let Err(err) = connection.send(&p.bytes[..p.len]) {
                             let _ = error_tx.send(err.to_string());
                             break 'play;
                         }
+                        index += 1;
                     }
-                    if !wait_until(timeline.duration) || !looping {
-                        break;
+                    if elapsed >= timeline.duration {
+                        if !looping {
+                            break;
+                        }
+                        silence(&mut connection, &mut active);
+                        index = 0;
+                        offset = 0;
+                        origin = Instant::now();
+                        continue;
                     }
-                    silence(&mut connection, &mut active);
+                    let next = timeline
+                        .packets
+                        .get(index)
+                        .map_or(timeline.duration, |p| p.micros);
+                    thread::park_timeout(Duration::from_micros(
+                        next.saturating_sub(elapsed).min(2000),
+                    ));
                 }
                 silence(&mut connection, &mut active);
                 state.done.store(true, Ordering::Relaxed);
             })?;
         Ok(Self {
+            edits,
             progress,
             errors,
             backend: Backend::Hardware {
