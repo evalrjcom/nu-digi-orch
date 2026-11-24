@@ -131,7 +131,9 @@ const INSTRUMENTS: [&str; 128] = [
 ];
 
 pub(super) fn instrument(track: &crate::song::Track) -> &'static str {
-    if track.channel == 9 {
+    if !track.has_midi() {
+        "—"
+    } else if track.channel == 9 {
         "Drum Kit"
     } else if track.setting(Some(0)) != 0 {
         "Bank Preset"
@@ -146,6 +148,8 @@ mod tests {
     #[test]
     fn labels_follow_patch_bank_and_channel() {
         let mut track = crate::song::Track::default();
+        assert_eq!(instrument(&track), "—");
+        track.set_setting(None, 0);
         assert_eq!(instrument(&track), "Acoustic Grand Piano");
         track.set_setting(None, 40);
         assert_eq!(instrument(&track), "Violin");

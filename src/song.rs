@@ -63,6 +63,7 @@ pub struct Track {
     pub bus: std::sync::Arc<crate::bus::Bus>,
     events: Vec<(Tick, Event)>,
     end: Tick,
+    inherited: Option<(u8, [Option<u8>; 4])>,
     pub mute: bool,
     pub solo: bool,
     pub channel: u8,
@@ -152,6 +153,18 @@ impl Timeline {
 
 fn invalid(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+const INITIAL_SETTINGS: [Option<u8>; 4] = [None, Some(0), Some(7), Some(10)];
+
+fn setting_value(message: MidiMessage, cc: Option<u8>) -> Option<u8> {
+    match message {
+        MidiMessage::ProgramChange { program } if cc.is_none() => Some(program.as_int()),
+        MidiMessage::Controller { controller, value } if cc == Some(controller.as_int()) => {
+            Some(value.as_int())
+        }
+        _ => None,
+    }
 }
 
 impl Track {
@@ -287,25 +300,59 @@ impl Track {
         self.channel = channel;
     }
 
-    pub fn setting(&self, cc: Option<u8>) -> u8 {
+    fn first_note(&self) -> Option<(Tick, usize)> {
         self.events
             .iter()
-            .rev()
-            .find_map(|(tick, event)| match event {
-                Event::Midi(channel, message) if *tick == 0 && *channel == self.channel => {
-                    match message {
-                        MidiMessage::ProgramChange { program } if cc.is_none() => {
-                            Some(program.as_int())
-                        }
-                        MidiMessage::Controller { controller, value }
-                            if cc == Some(controller.as_int()) =>
-                        {
-                            Some(value.as_int())
-                        }
-                        _ => None,
-                    }
+            .enumerate()
+            .filter_map(|(index, (tick, event))| match event {
+                Event::Midi(channel, MidiMessage::NoteOn { vel, .. })
+                    if *channel == self.channel && vel.as_int() > 0 =>
+                {
+                    Some((*tick, index))
                 }
                 _ => None,
+            })
+            .min()
+    }
+
+    fn setting_event(&self, cc: Option<u8>) -> Option<(Tick, usize, u8)> {
+        let cutoff = self.first_note();
+        self.events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (tick, event))| {
+                if cutoff.is_some_and(|first| (*tick, index) >= first) {
+                    return None;
+                }
+                let Event::Midi(channel, message) = event else {
+                    return None;
+                };
+                if *channel != self.channel {
+                    return None;
+                }
+                setting_value(*message, cc).map(|value| (*tick, index, value))
+            })
+            .max()
+    }
+
+    pub fn has_midi(&self) -> bool {
+        self.events
+            .iter()
+            .any(|(_, event)| matches!(event, Event::Midi(..)))
+    }
+
+    pub fn setting(&self, cc: Option<u8>) -> u8 {
+        self.setting_event(cc)
+            .map(|(_, _, value)| value)
+            .or_else(|| {
+                let (channel, settings) = self.inherited?;
+                if channel != self.channel {
+                    return None;
+                }
+                let index = INITIAL_SETTINGS
+                    .iter()
+                    .position(|candidate| *candidate == cc)?;
+                settings[index]
             })
             .unwrap_or(match cc {
                 Some(7) => 100,
@@ -324,38 +371,21 @@ impl Track {
                 value: value.into(),
             },
         };
-        self.events.retain(|(tick, event)| {
-            if *tick != 0 {
-                return true;
-            }
-            match event {
-                Event::Midi(channel, existing) if *channel == self.channel => match existing {
-                    MidiMessage::ProgramChange { .. } => cc.is_some(),
-                    MidiMessage::Controller { controller, .. } => cc != Some(controller.as_int()),
-                    _ => true,
-                },
-                _ => true,
-            }
-        });
-        // Apply initial patch and mixer settings before tick-zero notes.
-        let index = self
-            .events
-            .iter()
-            .position(|(tick, event)| {
-                if *tick != 0 {
-                    return false;
-                }
-                match event {
-                    Event::Midi(_, MidiMessage::NoteOn { .. }) => true,
-                    Event::Midi(channel, MidiMessage::ProgramChange { .. }) => {
-                        cc == Some(0) && *channel == self.channel
-                    }
-                    _ => false,
-                }
-            })
-            .unwrap_or(self.events.len());
+        // Edit the program that actually initializes the track and leave later changes intact.
+        if let Some((_, index, _)) = self.setting_event(cc) {
+            self.events[index].1 = Event::Midi(self.channel, message);
+            return;
+        }
+        let (tick, index) = if cc == Some(0) {
+            self.setting_event(None)
+                .map(|(tick, index, _)| (tick, index))
+                .or_else(|| self.first_note())
+                .unwrap_or((0, 0))
+        } else {
+            self.first_note().unwrap_or((0, 0))
+        };
         self.events
-            .insert(index, (0, Event::Midi(self.channel, message)));
+            .insert(index, (tick, Event::Midi(self.channel, message)));
     }
 }
 
@@ -588,27 +618,66 @@ impl Song {
         if ppq.as_int() == 0 || smf.tracks.is_empty() {
             return Err(invalid("The MIDI file has no usable timing or tracks.").into());
         }
-        let tracks = smf
+        let mut tracks: Vec<Track> = smf
             .tracks
             .into_iter()
             .map(|events| {
                 let mut track = Track::default();
                 let mut first_channel = None;
+                let mut note_channel = None;
                 for event in events {
                     track.end += u64::from(event.delta.as_int());
                     match event.kind {
                         TrackEventKind::Meta(MetaMessage::EndOfTrack) => continue,
-                        TrackEventKind::Midi { channel, .. } => {
+                        TrackEventKind::Midi { channel, message } => {
                             first_channel.get_or_insert(channel.as_int());
+                            if matches!(message, MidiMessage::NoteOn { vel, .. } if vel.as_int() > 0) {
+                                note_channel.get_or_insert(channel.as_int());
+                            }
                         }
                         _ => {}
                     }
                     track.events.push((track.end, Event::from_midi(event.kind)));
                 }
-                track.channel = first_channel.unwrap_or(0);
+                track.channel = note_channel.or(first_channel).unwrap_or(0);
                 track
             })
             .collect();
+        // Format 1 files may put channel initialization on a separate setup track.
+        let mut setup = Vec::new();
+        for (track_index, track) in tracks.iter().enumerate() {
+            let has_notes = track.events.iter().any(|(_, event)| {
+                matches!(event, Event::Midi(_, MidiMessage::NoteOn { vel, .. }) if vel.as_int() > 0)
+            });
+            if has_notes {
+                continue;
+            }
+            for (event_index, (tick, event)) in track.events.iter().enumerate() {
+                if let Event::Midi(channel, message) = event {
+                    for (index, cc) in INITIAL_SETTINGS.into_iter().enumerate() {
+                        if let Some(value) = setting_value(*message, cc) {
+                            setup.push(((*tick, track_index, event_index), *channel, index, value));
+                        }
+                    }
+                }
+            }
+        }
+        setup.sort_unstable_by_key(|entry| entry.0);
+        for (track_index, track) in tracks.iter_mut().enumerate() {
+            let Some((tick, event_index)) = track.first_note() else {
+                continue;
+            };
+            let mut settings = [None; 4];
+            for &(position, channel, index, value) in &setup {
+                if position >= (tick, track_index, event_index) {
+                    break;
+                }
+                if channel == track.channel {
+                    settings[index] = Some(value);
+                }
+            }
+            track.inherited = Some((track.channel, settings));
+        }
         Ok(Self {
             ppq: ppq.as_int(),
             tracks,
@@ -738,6 +807,51 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_patch_follows_first_note_channel_and_setup_events() {
+        let mut song = Song::new();
+        song.tracks[0].events.push((
+            24,
+            Event::Midi(4, MidiMessage::ProgramChange { program: 40.into() }),
+        ));
+        song.add_track();
+        let track = &mut song.tracks[1];
+        track.channel = 4;
+        track.events.push((
+            0,
+            Event::Midi(0, MidiMessage::ProgramChange { program: 1.into() }),
+        ));
+        track.add_note(48, 96, 60, 100);
+        track.events.push((
+            120,
+            Event::Midi(4, MidiMessage::ProgramChange { program: 73.into() }),
+        ));
+        let mut loaded = Song::decode(&song.encode().unwrap()).unwrap();
+        assert_eq!(loaded.tracks[1].channel, 4);
+        assert_eq!(loaded.tracks[1].setting(None), 40);
+        loaded.tracks[1].set_setting(None, 42);
+        let loaded = Song::decode(&loaded.encode().unwrap()).unwrap();
+        assert_eq!(loaded.tracks[1].setting(None), 42);
+        assert!(loaded.tracks[1].events.iter().any(|(tick,event)| {
+            *tick == 120 && matches!(event, Event::Midi(4, MidiMessage::ProgramChange { program }) if program.as_int() == 73)
+        }));
+    }
+
+    #[test]
+    fn imported_delayed_program_before_first_note_is_editable() {
+        let mut song = Song::new();
+        let track = &mut song.tracks[0];
+        track.events.push((
+            40,
+            Event::Midi(0, MidiMessage::ProgramChange { program: 56.into() }),
+        ));
+        track.add_note(40, 80, 60, 100);
+        let mut song = Song::decode(&song.encode().unwrap()).unwrap();
+        assert_eq!(song.tracks[0].setting(None), 56);
+        song.tracks[0].set_setting(None, 57);
+        assert_eq!(song.tracks[0].setting(None), 57);
+    }
 
     #[test]
     fn seeking_past_end_preserves_zero_remaining_duration() {
