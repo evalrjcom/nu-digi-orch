@@ -1,16 +1,26 @@
 # Nu Digi Orch
 
-Nu Digi Orch is a lightweight desktop MIDI composer in Rust and FLTK. It combines a track list and piano roll with SoundFont playback, hardware MIDI routing, and offline WAV rendering.
+Nu Digi Orch is a lightweight desktop MIDI composer in Rust and FLTK. Arrange and edit MIDI, audition instruments on a virtual piano, and mix SoundFont tracks for stereo WAV export. You can also route the arrangement to an external MIDI device.
+
+[Download a build from GitHub Actions](https://github.com/evalrjcom/nu-digi-orch/actions/workflows/build.yml).
 
 ## Track view and playhead
 
 The composer opens in split view. The upper table combines track names, channel, program, bank, volume, pan, mute, and solo with the arrangement lanes. Click a row to edit that track in the piano roll below. Double-click a name or numeric cell to edit it, or click M or S to toggle mute or solo. Scroll over the table to reach additional tracks.
 
-Choose **Full track view** for the arrangement alone. Click a beat on either ruler to cue playback or jump while playing. Play and Loop start at the cue, and Stop resets it. Use the tempo +/− buttons or click the up/down controls beside channel, program, bank, volume, or pan. Select a numeric cell to adjust it with the keyboard arrow keys.
+Choose **Full track view** for the arrangement alone. Click a beat on either ruler to cue playback or jump while playing. Play and Loop start at the cue. Use the BPM up/down arrows or click the up/down controls beside channel, program, bank, volume, or pan. Select a numeric cell to adjust it with the keyboard arrow keys.
 
 Choose **Full piano roll** or double-click an arrangement lane to expand the piano roll across the editing area. **Split view** restores the table. Both panes share the same beat grid and playback position.
 
-During playback and recording, the amber vertical line marks the current musical position in both views. It follows tempo changes, advances to the next 16-beat page, and returns to the beginning during loop playback.
+During playback and recording, the amber vertical line marks the current musical position in both views. It follows tempo changes, advances to the next 16-beat page, and returns to the cue during loop playback.
+
+| Control | Action |
+| --- | --- |
+| Space | Play or pause. Space remains available for typing in text fields. |
+| Ctrl+Left / Ctrl+Right | Jump backward or forward five seconds per press, including while paused or stopped. |
+| Stop | Stop at the current position. Click twice within 400 ms to return to the beginning. |
+| Ctrl+K | Open the virtual piano. |
+| Ctrl+Z / Ctrl+Y | Undo or redo. |
 
 ## Track mixer
 
@@ -22,11 +32,11 @@ Choose **Track mixer** in the view selector. Each strip shows the track name, MI
 2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system default or a device selected in **Audio device**. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
 3. Press **Play** or activate **Loop** before playback. To send MIDI to hardware or another application, select its port in **Output**.
 4. Double-click a track lane to open its piano roll. Click the piano roll to add or select a note. Drag a note to move it in pitch and time. Right-click or press Delete with the roll focused to remove a note. The note fields below the roll set exact tick position, pitch, duration, and velocity. **Snap** controls the edit grid, and **New length** controls the duration of newly drawn notes.
-5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. With an SF2 loaded, you can also choose a named preset. External devices share patch and controller settings per MIDI channel. Mute and Solo control playback and WAV export for the current session.
-6. Pick a port in **MIDI input…**, then press **Record MIDI**. The app captures a take from the start of the timeline. Play or monitor the instrument on your MIDI device during capture. **Stop** adds the take as a new editable track.
+5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. Click **SoundFont presets…** to browse banks, patches, and names in the loaded SoundFont. Select a preset, then click **Apply to track**. External devices share patch and controller settings per MIDI channel. Mute and Solo control playback and WAV export for the current session.
+6. Pick a port in **MIDI input…** in the upper-right corner, beside the audio device selector, then press **Record MIDI**. The app captures a take from the start of the timeline. Play or monitor the instrument on your MIDI device during capture. **Stop** adds the take as a new editable track.
 7. Save a standard MIDI file, or use **File → Export WAV** to mix the audible tracks to a stereo 44.1 kHz, 16-bit WAV with the loaded SoundFont.
 
-For longer songs, set **First beat** to move horizontally and **Top key** to change the pitch range. Use Ctrl+Z and Ctrl+Y for undo and redo.
+For longer songs, set **First beat** to move horizontally and **Top key** to change the pitch range.
 
 ## Sound Blaster and MIDI routing
 
@@ -69,7 +79,7 @@ In **Track mixer**, drag the Bass or Treble line left or right to cut or boost u
 
 The **Mixer** menu offers track starting points (Flat, Vocal presence, Bass weight, Acoustic sparkle) and master EQ/gain starting points (Flat unity, Warm tape EQ, Gentle smile EQ, Bright clarity). Select a track before applying a track preset. Tone and master settings apply during the session and are captured by GUI WAV export; Standard MIDI files retain their usual MIDI controls.
 
-Track and mixer views show the instrument associated with each track’s initial MIDI patch. Patch numbers use the stored MIDI range (0–127), one lower than printed GM tables (1–128). Channel 10 displays Drum Kit. Nonzero banks display Bank Preset because their instrument names depend on the selected device or SoundFont.
+Track and mixer views show the instrument associated with each track’s initial bank and patch. On MIDI import, the app checks Program Change events before the first note, including events on a separate setup track. Patch numbers use the MIDI range (0–127), one lower than printed GM tables (1–128). With a loaded SoundFont, labels use its preset names and follow the software synth’s fallback for missing presets. Without a SoundFont, the app uses General MIDI names for bank 0, Drum Kit for channel 10, and Bank Preset for other banks.
 
 ## Virtual piano and track effects
 
