@@ -4,6 +4,7 @@ mod audio;
 mod bus;
 mod effects;
 mod gm;
+mod harmony;
 mod keyboard;
 mod mixer;
 mod recording;
@@ -86,6 +87,10 @@ enum Action {
     RecordSelected,
     RecordBacking,
     MetronomeChanged,
+    CountIn(u8),
+    CountSound(rhythm::Pattern),
+    KeySignature,
+    Transpose,
     Stop,
     OutputChanged,
     LoadFont,
@@ -115,6 +120,9 @@ struct Model {
     captured: Vec<(u64, [u8; 3])>,
     record_target: Option<usize>,
     record_offset: u64,
+    record_lead: u64,
+    count_beats: u8,
+    count_sound: rhythm::Pattern,
     click: Option<rhythm::Pattern>,
     export_in_progress: bool,
     inputs: Vec<recording::InputPort>,
@@ -167,6 +175,9 @@ impl Model {
             captured: Vec::new(),
             record_target: None,
             record_offset: 0,
+            record_lead: 0,
+            count_beats: 0,
+            count_sound: rhythm::Pattern::Click,
             click: None,
             export_in_progress: false,
             inputs: Vec::new(),
@@ -301,6 +312,10 @@ struct Ui {
 
     status: Frame,
     clock: Frame,
+    chord: Frame,
+    piano_dock: Button,
+    chords: Vec<(Tick, Option<harmony::Chord>)>,
+    keys: Vec<(Tick, (i8, bool))>,
 }
 
 impl Ui {
@@ -325,6 +340,26 @@ impl Ui {
             ("File/Quit", Some('q'), Action::Quit),
             ("Edit/Undo", Some('z'), Action::Undo),
             ("Edit/Redo", Some('y'), Action::Redo),
+            ("Edit/Set key signature…", None, Action::KeySignature),
+            ("Edit/Transpose song…", None, Action::Transpose),
+            ("Playback/Count-in/Off", None, Action::CountIn(0)),
+            ("Playback/Count-in/1 bar", None, Action::CountIn(4)),
+            ("Playback/Count-in/2 bars", None, Action::CountIn(8)),
+            (
+                "Playback/Count-in sound/Click",
+                None,
+                Action::CountSound(rhythm::Pattern::Click),
+            ),
+            (
+                "Playback/Count-in sound/Cowbell",
+                None,
+                Action::CountSound(rhythm::Pattern::Cowbell),
+            ),
+            (
+                "Playback/Count-in sound/Side stick",
+                None,
+                Action::CountSound(rhythm::Pattern::SideStick),
+            ),
             ("Edit/Delete Note", None, Action::DeleteNote),
             ("Edit/Quantize Selected Note", None, Action::SnapNote),
             (
@@ -393,21 +428,25 @@ impl Ui {
         play.set_tooltip("Play");
         let looping = fltk::button::ToggleButton::new(165, 43, 68, 29, "Loop");
         let clock = flat_label(246, 43, 100, 29, "00:00.0", 17, ACCENT);
-        flat_label(355, 43, 40, 29, "BPM", 13, SUBTLE);
-        let mut bpm = Input::new(398, 43, 70, 30, None);
+        let mut chord = flat_label(344, 43, 125, 29, "—", 13, TEXT);
+        chord.set_frame(FrameType::DownBox);
+        chord.set_color(PANEL);
+        chord.set_tooltip("Chord and MIDI key signature at the playhead");
+        flat_label(480, 43, 40, 29, "BPM", 13, SUBTLE);
+        let mut bpm = Input::new(521, 43, 70, 30, None);
         bpm.set_trigger(fltk::enums::CallbackTrigger::EnterKey);
         bpm.emit(tx, Action::Tempo);
         for (y, symbol, step, hint) in [
             (43, "@8>", 1, "Increase tempo by 1 BPM"),
             (58, "@2>", -1, "Decrease tempo by 1 BPM"),
         ] {
-            let mut arrow = fltk::button::RepeatButton::new(469, y, 25, 15, symbol);
+            let mut arrow = fltk::button::RepeatButton::new(592, y, 25, 15, symbol);
             arrow.set_label_size(9);
             arrow.set_tooltip(hint);
             arrow.emit(tx, Action::TempoStep(step));
         }
-        flat_label(517, 43, 53, 29, "Output", 13, SUBTLE);
-        let mut output = Choice::new(571, 43, 241, 29, None);
+        flat_label(625, 43, 53, 29, "Output", 13, SUBTLE);
+        let mut output = Choice::new(676, 43, 136, 29, None);
         output.add_choice("Software SoundFont");
         output.set_value(0);
         output.emit(tx, Action::OutputChanged);
@@ -566,6 +605,7 @@ impl Ui {
         audio_device.set_value(0);
         audio_device.set_tooltip("Audio destination for the software SoundFont synthesizer.");
         audio_device.emit(tx, Action::OutputChanged);
+        let piano_dock = button(1035, 631, 129, "Virtual piano", tx, Action::VirtualKeyboard);
         let status = flat_label(
             16,
             682,
@@ -689,6 +729,10 @@ impl Ui {
 
             status,
             clock,
+            chord,
+            piano_dock,
+            chords: Vec::new(),
+            keys: Vec::new(),
         }
     }
 
@@ -784,8 +828,60 @@ impl Ui {
                 .set_value(&(note.end - note.start).to_string());
             self.velocity.set_value(&note.velocity.to_string());
         }
+        self.chords = harmony::progression(&model.song);
+        self.keys = model.song.key_map();
+        self.update_music_display(model);
         self.grid.redraw();
         self.arrangement.redraw();
+    }
+
+    fn update_music_display(&mut self, model: &Model) {
+        let key = self
+            .keys
+            .get(
+                self.keys
+                    .partition_point(|&(tick, _)| tick <= model.playhead)
+                    .wrapping_sub(1),
+            )
+            .map(|entry| entry.1);
+        let chord = self
+            .chords
+            .get(
+                self.chords
+                    .partition_point(|&(tick, _)| tick <= model.playhead)
+                    .wrapping_sub(1),
+            )
+            .and_then(|entry| entry.1)
+            .map_or_else(
+                || "—".to_owned(),
+                |chord| chord.label(key.is_some_and(|k| k.0 < 0)),
+            );
+        let label = key.map_or_else(
+            || chord.clone(),
+            |key| format!("{chord} · {}", harmony::key_name(key)),
+        );
+        if self.chord.label() != label {
+            self.chord.set_label(&label);
+            self.chord.set_tooltip(&label);
+        }
+        let dock = if self.keyboard.docked() {
+            if model.recording.is_some() {
+                "Docked · REC"
+            } else if model
+                .playback
+                .as_ref()
+                .is_some_and(|playback| !playback.progress.paused.load(Ordering::Relaxed))
+            {
+                "Docked · PLAY"
+            } else {
+                "Piano docked"
+            }
+        } else {
+            "Virtual piano"
+        };
+        if self.piano_dock.label() != dock {
+            self.piano_dock.set_label(dock);
+        }
     }
 
     fn advance_playhead(&mut self, model: &mut Model, micros: u64) {
@@ -1136,6 +1232,14 @@ fn live_edit(model: &mut Model, messages: Vec<song::Packet>, rebuild: bool) {
     }
     rhythm::append(&mut timeline, &model.song, model.click);
     timeline.seek(model.offset);
+    if model.recording.is_some() && model.record_lead > 0 && model.offset == model.record_offset {
+        rhythm::prepend_count_in(
+            &mut timeline,
+            model.count_beats,
+            model.record_lead / u64::from(model.count_beats),
+            model.count_sound,
+        );
+    }
     let position = time_for(tick)
         .saturating_sub(model.offset)
         .min(timeline.duration);
@@ -1216,6 +1320,7 @@ fn apply(
             action,
             Action::Stop
                 | Action::RecordBacking
+                | Action::VirtualKeyboard
                 | Action::MetronomeChanged
                 | Action::OutputChanged
                 | Action::View
@@ -1226,11 +1331,76 @@ fn apply(
         return Err("Press Stop to finish the MIDI take first.".into());
     }
     match action {
+        Action::CountIn(beats) => {
+            model.count_beats = beats;
+            ui.status.set_label(if beats == 0 {
+                "Count-in off"
+            } else if beats == 4 {
+                "Count-in: 1 bar"
+            } else {
+                "Count-in: 2 bars"
+            });
+        }
+        Action::CountSound(sound) => {
+            model.count_sound = sound;
+            ui.status.set_label(&format!("Count-in sound: {sound:?}"));
+        }
+        Action::KeySignature => {
+            let current = model
+                .song
+                .key_map()
+                .into_iter()
+                .rfind(|&(tick, _)| tick <= model.playhead)
+                .map_or_else(|| "C major".to_string(), |(_, key)| harmony::key_name(key));
+            if let Some(input) =
+                dialog::input_default("Key at playhead (e.g. Bb major or F# minor)", &current)
+            {
+                let (name, mode) = input
+                    .trim()
+                    .split_once(' ')
+                    .ok_or("Enter a note name followed by major or minor.")?;
+                let minor = match mode.trim().to_ascii_lowercase().as_str() {
+                    "major" => false,
+                    "minor" => true,
+                    _ => return Err("Use major or minor.".into()),
+                };
+                let names = if minor {
+                    harmony::MINOR
+                } else {
+                    harmony::MAJOR
+                };
+                let index = names
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(name))
+                    .ok_or("Use a standard MIDI key signature with up to seven sharps or flats.")?;
+                model.checkpoint();
+                model.song.set_key(model.playhead, (index as i8 - 7, minor));
+            }
+        }
+        Action::Transpose => {
+            if let Some(value) = dialog::input_default("Transpose song by semitones", "0") {
+                let shift: i8 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| "Enter a signed semitone count.")?;
+                if shift != 0 {
+                    let mut revised = model.song.clone();
+                    revised.transpose(shift)?;
+                    model.checkpoint();
+                    model.song = revised;
+                    model.selected = None;
+                    model.fit_pitch();
+                }
+            }
+        }
         Action::MetronomeChanged => {
-            model.click = ui
-                .metronome
-                .value()
-                .then(|| rhythm::Pattern::ALL[ui.rhythm.value().clamp(0, 4) as usize]);
+            model.click = ui.metronome.value().then(|| {
+                rhythm::Pattern::ALL[ui
+                    .rhythm
+                    .value()
+                    .clamp(0, (rhythm::Pattern::ALL.len() - 1) as i32)
+                    as usize]
+            });
             if let Some(playback) = model
                 .playback
                 .as_ref()
@@ -1253,9 +1423,13 @@ fn apply(
                 };
                 live_edit(model, messages, false);
             } else if model.recording.is_some() && model.click.is_some() {
-                let micros = model
-                    .record_offset
-                    .saturating_add(model.recording.as_ref().map_or(0, |take| take.elapsed()));
+                let micros = model.record_offset.saturating_add(
+                    model
+                        .recording
+                        .as_ref()
+                        .map_or(0, |take| take.elapsed())
+                        .saturating_sub(model.record_lead),
+                );
                 model.cue = model.song.tempo_clock()(micros);
                 model.jump_cue = Some(micros);
                 apply(Action::RecordBacking, ui, model, background)?;
@@ -1674,21 +1848,24 @@ fn apply(
                 }
             }
             let mut timeline = model.song.timeline();
-            if model.recording.is_some() && ui.metronome.value() {
+            if model.recording.is_some() && (ui.metronome.value() || model.record_lead > 0) {
                 timeline.duration = timeline
                     .duration
                     .max(model.record_offset.saturating_add(3_600_000_000));
             }
-            model.click = ui
-                .metronome
-                .value()
-                .then(|| rhythm::Pattern::ALL[ui.rhythm.value().clamp(0, 4) as usize]);
+            model.click = ui.metronome.value().then(|| {
+                rhythm::Pattern::ALL[ui
+                    .rhythm
+                    .value()
+                    .clamp(0, (rhythm::Pattern::ALL.len() - 1) as i32)
+                    as usize]
+            });
             if model.click.is_some() && timeline.duration == 0 {
                 let clock = model.song.tempo_clock();
                 timeline.duration = tick_time(&clock, u64::from(model.song.ppq) * 16, u64::MAX);
             }
             rhythm::append(&mut timeline, &model.song, model.click);
-            if timeline.packets.is_empty() || timeline.duration == 0 {
+            if (timeline.packets.is_empty() && model.record_lead == 0) || timeline.duration == 0 {
                 return Err("Add notes to an audible track before playing.".into());
             }
             model.playback = None;
@@ -1703,6 +1880,14 @@ fn apply(
             }
             model.offset = low;
             timeline.seek(low);
+            if model.recording.is_some() && model.record_lead > 0 && low == model.record_offset {
+                rhythm::prepend_count_in(
+                    &mut timeline,
+                    model.count_beats,
+                    model.record_lead / u64::from(model.count_beats),
+                    model.count_sound,
+                );
+            }
             let looping = ui.looping.value() && model.recording.is_none();
             model.playback = Some(if ui.output.value() > 0 {
                 let port = model
@@ -1741,6 +1926,8 @@ fn apply(
             } else {
                 0
             };
+            let record_tick = clock(offset);
+            let lead = model.song.beat_micros_at(record_tick) * u64::from(model.count_beats);
             let recording = if let Some(port) = port {
                 recording::Recording::start(&port.port)?
             } else {
@@ -1753,18 +1940,21 @@ fn apply(
             model.captured.clear();
             model.record_target = target;
             model.record_offset = offset;
+            model.record_lead = lead;
             model.cue = clock(offset);
             model.jump_cue = Some(offset);
             model.playhead = model.cue;
             model.tick_at_time = Box::new(clock);
             model.recording = Some(recording);
-            if ui.metronome.value()
+            if lead > 0
+                || ui.metronome.value()
                 || into_track
                     && offset < duration
                     && (model.font.is_some() || ui.output.value() > 0)
             {
                 // A failed backing output must not discard the recording.
                 if let Err(error) = apply(Action::RecordBacking, ui, model, background) {
+                    model.record_lead = 0;
                     ui.status
                         .set_label(&format!("Recording without backing audio · {error}"));
                     return Ok(true);
@@ -1803,8 +1993,30 @@ fn apply(
             if let Some(recording) = model.recording.take() {
                 ui.keyboard.capture(None);
                 model.playback = None;
-                let (duration, events, dropped) =
+                let (duration, mut events, dropped) =
                     recording.finish(std::mem::take(&mut model.captured));
+                let lead = std::mem::take(&mut model.record_lead);
+                let mut recorded_keys = [[0_u32; 128]; 16];
+                events.retain_mut(|(time, [status, key, velocity])| {
+                    let Some(relative) = time.checked_sub(lead) else {
+                        return false;
+                    };
+                    *time = relative;
+                    if lead > 0 && matches!(*status & 0xf0, 0x80 | 0x90) {
+                        let count =
+                            &mut recorded_keys[usize::from(*status & 15)][usize::from(*key)];
+                        if *status & 0xf0 == 0x90 && *velocity != 0 {
+                            *count += 1;
+                        } else if *count == 0 {
+                            // A key pressed before the count ended may be released during the take.
+                            return false;
+                        } else {
+                            *count -= 1;
+                        }
+                    }
+                    true
+                });
+                let duration = duration.saturating_sub(lead);
                 if events.is_empty() {
                     ui.status.set_label("The MIDI take was empty.");
                 } else {
@@ -2080,7 +2292,18 @@ fn main() {
             let model = &mut *model;
             if let Some(recording) = &model.recording {
                 recording.drain(&mut model.captured);
-                let micros = model.record_offset.saturating_add(recording.elapsed());
+                let recorded = recording.elapsed();
+                let remaining = model.record_lead.saturating_sub(recorded);
+                if remaining > 0 {
+                    let interval = model.record_lead / u64::from(model.count_beats);
+                    ui.status
+                        .set_label(&format!("Count-in · {}", remaining.div_ceil(interval)));
+                } else if ui.status.label().starts_with("Count-in ·") {
+                    ui.status.set_label("Recording · Stop to keep the take");
+                }
+                let micros = model
+                    .record_offset
+                    .saturating_add(recorded.saturating_sub(model.record_lead));
                 let elapsed = micros / 100_000;
                 ui.advance_playhead(model, micros);
                 ui.clock.set_label(&format!(
@@ -2120,6 +2343,7 @@ fn main() {
                 ui.arrangement.redraw();
             }
         }
+        ui.update_music_display(&model);
     }
 }
 

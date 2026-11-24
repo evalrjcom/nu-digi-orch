@@ -23,6 +23,7 @@ struct State {
     sender: Option<Sender<song::Packet>>,
     stream: Option<audio::Playback>,
     capture: Option<crate::recording::Capture>,
+    docked: bool,
 }
 
 impl State {
@@ -98,6 +99,7 @@ impl Keyboard {
             sender: None,
             stream: None,
             capture: None,
+            docked: false,
         }));
         let shared = state.clone();
         keys.draw(move |f| {
@@ -231,9 +233,25 @@ impl Keyboard {
         window.set_callback(move |w| {
             let mut s = shared.borrow_mut();
             s.release();
-            s.sender = None;
-            s.stream = None;
+            s.docked = true;
+            if s.capture.is_none() {
+                s.sender = None;
+                s.stream = None;
+            }
             w.hide();
+        });
+        let mut dock = fltk::button::Button::new(622, 8, 84, 28, "Dock");
+        let shared = state.clone();
+        let mut dock_window = window.clone();
+        dock.set_callback(move |_| {
+            let mut state = shared.borrow_mut();
+            state.release();
+            state.docked = true;
+            if state.capture.is_none() {
+                state.sender = None;
+                state.stream = None;
+            }
+            dock_window.hide();
         });
         window.end();
         Self {
@@ -243,10 +261,18 @@ impl Keyboard {
         }
     }
 
+    pub fn docked(&self) -> bool {
+        self.state.borrow().docked
+    }
+
     pub fn capture(&self, capture: Option<crate::recording::Capture>) {
         let mut state = self.state.borrow_mut();
         state.release();
         state.capture = capture;
+        if state.docked && state.capture.is_none() {
+            state.sender = None;
+            state.stream = None;
+        }
     }
 
     pub fn open(
@@ -256,7 +282,7 @@ impl Keyboard {
         levels: Arc<effects::Levels>,
         device: Option<&audio::SoundDevice>,
     ) -> song::Result<()> {
-        if !self.window.shown() {
+        if !self.window.shown() && self.state.borrow().capture.is_none() {
             let channel = track.channel;
             let timeline = song::Timeline {
                 instrument_tracks: vec![0],
@@ -284,6 +310,7 @@ impl Keyboard {
             state.sender = Some(sender);
             state.stream = Some(stream);
         }
+        self.state.borrow_mut().docked = false;
         self.window.show();
         self.keys.redraw();
         Ok(())

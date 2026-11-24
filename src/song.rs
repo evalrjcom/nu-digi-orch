@@ -534,6 +534,84 @@ impl Song {
         index
     }
 
+    pub fn beat_micros_at(&self, position: Tick) -> u64 {
+        self.tracks
+            .iter()
+            .flat_map(|track| &track.events)
+            .filter_map(|(tick, event)| match event {
+                Event::Meta(MetaMessage::Tempo(value))
+                    if *tick <= position && value.as_int() != 0 =>
+                {
+                    Some((*tick, u64::from(value.as_int())))
+                }
+                _ => None,
+            })
+            .max_by_key(|entry| entry.0)
+            .map_or(500_000, |entry| entry.1)
+    }
+
+    pub fn key_map(&self) -> Vec<(Tick, (i8, bool))> {
+        let mut keys: Vec<_> = self
+            .tracks
+            .iter()
+            .flat_map(|track| &track.events)
+            .filter_map(|(tick, event)| match event {
+                Event::Meta(MetaMessage::KeySignature(n, minor)) => Some((*tick, (*n, *minor))),
+                _ => None,
+            })
+            .collect();
+        keys.sort_by_key(|entry| entry.0);
+        keys
+    }
+
+    pub fn set_key(&mut self, tick: Tick, key: (i8, bool)) {
+        for track in &mut self.tracks {
+            track.events.retain(|(at, event)| {
+                *at != tick || !matches!(event, Event::Meta(MetaMessage::KeySignature(..)))
+            });
+        }
+        self.tracks[0]
+            .events
+            .push((tick, Event::Meta(MetaMessage::KeySignature(key.0, key.1))));
+    }
+
+    pub fn transpose(&mut self, semitones: i8) -> Result<()> {
+        let pitch = |key: u7| i16::from(key.as_int()) + i16::from(semitones);
+        for (_, event) in self.tracks.iter().flat_map(|track| &track.events) {
+            if let Event::Midi(
+                channel,
+                MidiMessage::NoteOn { key, .. }
+                | MidiMessage::NoteOff { key, .. }
+                | MidiMessage::Aftertouch { key, .. },
+            ) = event
+            {
+                if *channel != 9 && !(0..=127).contains(&pitch(*key)) {
+                    return Err(invalid(
+                        "Transposition would move a note outside MIDI pitches 0–127.",
+                    )
+                    .into());
+                }
+            }
+        }
+        for (_, event) in self.tracks.iter_mut().flat_map(|track| &mut track.events) {
+            match event {
+                Event::Midi(
+                    channel,
+                    MidiMessage::NoteOn { key, .. }
+                    | MidiMessage::NoteOff { key, .. }
+                    | MidiMessage::Aftertouch { key, .. },
+                ) if *channel != 9 => {
+                    *key = (pitch(*key) as u8).into();
+                }
+                Event::Meta(MetaMessage::KeySignature(n, minor)) => {
+                    *n = crate::harmony::transpose_key(*n, *minor, semitones);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn tempo_clock(&self) -> impl Fn(u64) -> Tick + 'static {
         let mut tempos: Vec<_> = self
             .tracks
@@ -824,6 +902,25 @@ impl Song {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transpose_moves_notes_and_keys_but_preserves_drums_and_rejects_overflow() {
+        let mut song = Song::new();
+        song.tracks[0].add_note(0, 480, 60, 80);
+        song.add_track();
+        song.tracks[1].set_channel(9);
+        song.tracks[1].add_note(0, 480, 36, 80);
+        song.set_key(0, (0, false));
+        song.transpose(2).unwrap();
+        assert_eq!(song.tracks[0].notes()[0].key, 62);
+        assert_eq!(song.tracks[1].notes()[0].key, 36);
+        assert_eq!(
+            Song::decode(&song.encode().unwrap()).unwrap().key_map(),
+            vec![(0, (2, false))]
+        );
+        assert!(song.transpose(100).is_err());
+        assert_eq!(song.tracks[0].notes()[0].key, 62);
+    }
 
     #[test]
     fn overdub_uses_selected_channel_and_keeps_existing_notes() {

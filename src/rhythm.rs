@@ -5,6 +5,8 @@ use std::sync::Arc;
 pub enum Pattern {
     #[default]
     Click,
+    Cowbell,
+    SideStick,
     Rock,
     FourOnFloor,
     HipHop,
@@ -12,29 +14,36 @@ pub enum Pattern {
 }
 
 impl Pattern {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Click,
+        Self::Cowbell,
+        Self::SideStick,
         Self::Rock,
         Self::FourOnFloor,
         Self::HipHop,
         Self::Shuffle,
     ];
-    pub const LABELS: &str = "Click|Rock|Four-on-floor|Hip-hop|Shuffle";
+    pub const LABELS: &str = "Click|Cowbell|Side stick|Rock|Four-on-floor|Hip-hop|Shuffle";
 
     fn hits(self, step: u64) -> [(u8, u8); 3] {
         let (kick, snare, hat) = match self {
-            Self::Click => {
+            Self::Click | Self::Cowbell | Self::SideStick => {
+                let (strong, weak) = match self {
+                    Self::Cowbell => (56, 56),
+                    Self::SideStick => (37, 37),
+                    _ => (76, 77),
+                };
                 return [
                     if step == 0 {
-                        (76, 115)
+                        (strong, 115)
                     } else if step.is_multiple_of(6) {
-                        (77, 90)
+                        (weak, 90)
                     } else {
                         (0, 0)
                     },
                     (0, 0),
                     (0, 0),
-                ]
+                ];
             }
             Self::Rock => (
                 matches!(step, 0 | 12 | 15),
@@ -76,7 +85,7 @@ impl Pattern {
     }
 }
 
-pub const NOTES: [u8; 5] = [36, 38, 42, 76, 77];
+pub const NOTES: [u8; 7] = [36, 37, 38, 42, 56, 76, 77];
 
 // Reserve the SoundFont stem even when switched off, so live enabling needs no new audio stream.
 pub fn append(timeline: &mut Timeline, song: &Song, pattern: Option<Pattern>) {
@@ -125,9 +134,50 @@ pub fn append(timeline: &mut Timeline, song: &Song, pattern: Option<Pattern>) {
     timeline.packets.sort_by_key(|p| p.micros);
 }
 
+pub fn prepend_count_in(timeline: &mut Timeline, beats: u8, interval: u64, sound: Pattern) {
+    let lead = interval * u64::from(beats);
+    for packet in &mut timeline.packets {
+        packet.micros = packet.micros.saturating_add(lead);
+    }
+    let track = timeline.buses.len() - 1;
+    for beat in 0..beats {
+        let micros = interval * u64::from(beat);
+        let (key, velocity) = sound.hits(u64::from(beat % 4) * 6)[0];
+        timeline.packets.push(Packet {
+            track,
+            micros,
+            bytes: [0x99, key, velocity],
+            len: 3,
+        });
+        timeline.packets.push(Packet {
+            track,
+            micros: micros + 36_000.min(interval / 2),
+            bytes: [0x89, key, 0],
+            len: 3,
+        });
+    }
+    timeline.packets.sort_by_key(|packet| packet.micros);
+    timeline.duration = timeline.duration.saturating_add(lead);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cowbell_count_in_precedes_and_offsets_the_song() {
+        let song = Song::demo();
+        let mut timeline = song.timeline();
+        let length = timeline.duration;
+        let original = timeline.packets[0];
+        append(&mut timeline, &song, None);
+        prepend_count_in(&mut timeline, 4, 500_000, Pattern::Cowbell);
+        assert_eq!(timeline.duration, length + 2_000_000);
+        assert_eq!(timeline.packets[0].bytes, [0x99, 56, 115]);
+        assert!(timeline.packets.iter().any(|p| p.track == original.track
+            && p.bytes == original.bytes
+            && p.micros == original.micros + 2_000_000));
+    }
+
     #[test]
     fn off_reserves_the_same_stem_and_patterns_use_tempo() {
         let mut song = Song::demo();

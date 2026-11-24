@@ -93,3 +93,11 @@ In **Track Mixer**, drag the Reverb, Chorus, or Delay slider on an individual tr
 Select a track and press **Ctrl+R** or choose **Track → Record into selected track** to overdub from the playhead. The red Record button starts a separate take from the beginning. Select a MIDI input for hardware capture, or leave the selector on **MIDI input…** to open and record the virtual piano. Press **Stop** to keep the take. **Escape** also stops a take from the virtual piano window.
 
 Toggle **Metronome** before or during playback or recording. Use the pattern selector to choose **Click**, **Rock**, **Four-on-floor**, **Hip-hop**, or **Shuffle**. The patterns follow the song tempo and repeat every four beats. On an empty project, enable Metronome and press Play to audition four bars, or enable Loop to keep them repeating. The click uses the selected playback output and stays out of MIDI saves and WAV exports. With the metronome enabled, recording provides up to one hour of click past the starting position.
+
+## Count-in and harmony
+
+Choose **Playback → Count-in** for zero, one, or two bars before recording. Choose **Count-in sound** for Click, Cowbell, or Side stick. The count uses the tempo at the entry point and four beats per bar. Recording starts after the count, and count-in notes stay out of saves and exports. Cowbell and Side stick are also available in the live metronome selector.
+
+Click **Dock** on the virtual piano to hide it. The main window’s piano button shows whether the piano is docked during playback or recording. Click that button to bring the piano back. Existing hardware MIDI capture continues when the piano is docked.
+
+The box beside the clock displays a recognized chord and the explicit MIDI key signature at the playhead. Chords come from overlapping notes on audible melodic tracks. Use **Edit → Set key signature** at the playhead to save a major or minor key change, or **Edit → Transpose song** to shift all melodic notes and key signatures by a signed number of semitones. General MIDI drums keep their original pitches.
