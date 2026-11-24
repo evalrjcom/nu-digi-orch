@@ -62,6 +62,8 @@ enum Action {
     RemoveTrack,
     Cell(usize, usize),
     Preset,
+    BrowsePresets,
+    TogglePlayback,
     Tempo,
     View,
     ToggleEditor,
@@ -254,7 +256,9 @@ struct Ui {
     effects: Window,
     win: Window,
     arrangement: Frame,
-    preset: Choice,
+    preset: fltk::browser::HoldBrowser,
+    preset_window: Window,
+    last_stop: Option<std::time::Instant>,
     presets: Vec<(i32, i32)>,
     bpm: Input,
     output: Choice,
@@ -289,7 +293,7 @@ impl Ui {
         win.set_color(BG);
         win.size_range(1160, 690, 0, 0);
 
-        let mut menu = MenuBar::new(0, 0, WIDTH, 30, None);
+        let mut menu = MenuBar::new(0, 0, 785, 36, None);
         menu.set_color(PANEL);
         for (path, key, action) in [
             ("File/New", Some('n'), Action::New),
@@ -383,10 +387,21 @@ impl Ui {
         flat_label(16, 85, 37, 25, "View", 13, SUBTLE);
         button(232, 83, 68, "+ Track", tx, Action::AddTrack);
         button(306, 83, 32, "−", tx, Action::RemoveTrack).set_tooltip("Remove selected track");
-        let mut preset = Choice::new(16, 633, 215, 29, None);
-        preset.add_choice("SoundFont presets…");
-        preset.set_value(0);
-        preset.emit(tx, Action::Preset);
+        button(
+            16,
+            633,
+            215,
+            "SoundFont presets…",
+            tx,
+            Action::BrowsePresets,
+        );
+        menu.add(
+            "Playback/Play or pause",
+            Shortcut::from_char(' '),
+            MenuFlag::Normal,
+            move |_| tx.send(Action::TogglePlayback),
+        );
+
         let first_label = flat_label(362, 85, 66, 25, "First beat", 13, SUBTLE);
         let mut beat = number(428, 85, 62, 1);
         let pitch_label = flat_label(574, 85, 62, 25, "Top key", 13, SUBTLE);
@@ -500,15 +515,15 @@ impl Ui {
         toggle_editor.add_choice("Split view|Full track view|Full piano roll|Track mixer");
         toggle_editor.set_value(0);
         toggle_editor.emit(tx, Action::ToggleEditor);
-        let mut midi_input = Choice::new(613, 681, 171, 28, None);
+        let mut midi_input = Choice::new(797, 7, 168, 28, None);
         midi_input.add_choice("MIDI input…");
         midi_input.set_value(0);
         midi_input.set_tooltip("Choose a MIDI input, then press Record.");
         let mut record = button(114, 43, 45, "@circle", tx, Action::Record);
         record.set_label_color(Color::Red);
         record.set_tooltip("Start a new MIDI take. Press Stop to keep it.");
-        flat_label(808, 681, 99, 27, "Audio device", 13, SUBTLE);
-        let mut audio_device = Choice::new(908, 681, 256, 29, None);
+
+        let mut audio_device = Choice::new(974, 7, 190, 29, None);
         audio_device.add_choice("System default");
         audio_device.set_value(0);
         audio_device.set_tooltip("Audio destination for the software SoundFont synthesizer.");
@@ -562,10 +577,10 @@ impl Ui {
         win.resize_callback(move |_, _, _, w, h| {
             for (widget, (x, y, width, height)) in &anchored {
                 let mut widget = widget.clone();
-                let right = *y == 681 && *x >= 613;
+                let right = *y == 7 && *x >= 797;
                 let px = if right { x + w - WIDTH } else { *x };
                 let py = if *y >= 631 { y + h - HEIGHT } else { *y };
-                widget.resize(px, py, if *y == 0 { w } else { *width }, *height);
+                widget.resize(px, py, if *y == 0 { w - 395 } else { *width }, *height);
             }
             let mut grid = layout_grid.clone();
             let mut tracks = layout_tracks.clone();
@@ -598,11 +613,19 @@ impl Ui {
             });
         }
         effects.end();
+        let preset_window = Window::new(130, 120, 590, 510, "SoundFont presets · Bank / Patch");
+        let preset = fltk::browser::HoldBrowser::new(12, 12, 566, 442, None);
+        preset_window.resizable(&preset);
+        button(12, 466, 150, "Apply to track", tx, Action::Preset);
+        button(174, 466, 150, "Load SF2…", tx, Action::LoadFont);
+        preset_window.end();
         Self {
             effects,
             win,
             arrangement,
             preset,
+            preset_window,
+            last_stop: None,
             presets: Vec::new(),
             bpm,
             output,
@@ -643,7 +666,7 @@ impl Ui {
         let track = &model.song.tracks[model.track];
         let bank = i32::from(track.setting(Some(0))) + if track.channel == 9 { 128 } else { 0 };
         let program = i32::from(track.setting(None));
-        self.preset.set_value(
+        self.preset.select(
             self.presets
                 .iter()
                 .position(|&(b, p)| b == bank && p == program)
@@ -742,8 +765,9 @@ impl Ui {
         let font = audio::load_font(path)?;
         self.presets.clear();
         self.preset.clear();
-        self.preset.add_choice("SoundFont presets…");
-        for preset in font.get_presets() {
+        let mut entries: Vec<_> = font.get_presets().iter().collect();
+        entries.sort_by_key(|preset| (preset.get_bank_number(), preset.get_patch_number()));
+        for preset in entries {
             let bank = preset.get_bank_number();
             let program = preset.get_patch_number();
             if !(0..=255).contains(&bank) || !(0..=127).contains(&program) {
@@ -751,7 +775,8 @@ impl Ui {
             }
             self.presets.push((bank, program));
             let name = menu_label(preset.get_name());
-            self.preset.add_choice(&format!("{bank}:{program}  {name}"));
+            self.preset
+                .add(&format!("{bank:03} / {program:03}   {name}"));
         }
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         self.font
@@ -1103,6 +1128,20 @@ fn mixer_message(track: usize, channel: u8, controller: Option<u8>, value: u8) -
     }
 }
 
+fn halt_playback(model: &mut Model) {
+    if let Some(playback) = model.playback.take() {
+        let elapsed = playback.progress.position.load(Ordering::Relaxed);
+        let position = model.offset.saturating_add(elapsed);
+        // A cursor in the release tail resumes from the opening cue.
+        if position < model.duration_micros {
+            model.playhead = (model.tick_at_time)(position);
+            model.cue = model.playhead;
+        } else {
+            model.cue = 0;
+        }
+    }
+}
+
 fn apply(
     action: Action,
     ui: &mut Ui,
@@ -1337,6 +1376,26 @@ fn apply(
             }
             model.fit_pitch();
         }
+        Action::BrowsePresets => {
+            if model.font.is_none() {
+                apply(Action::LoadFont, ui, model, background)?;
+            }
+            if model.font.is_some() {
+                ui.preset_window.set_label(&format!(
+                    "SoundFont presets · {}",
+                    model.song.tracks[model.track].name()
+                ));
+                ui.preset_window.show();
+            }
+        }
+        Action::TogglePlayback => {
+            if model.playback.is_some() {
+                halt_playback(model);
+                ui.status.set_label("Paused");
+            } else {
+                return apply(Action::Play, ui, model, background);
+            }
+        }
         Action::Preset => {
             if let Some(&(bank, program)) = ui
                 .presets
@@ -1416,6 +1475,7 @@ fn apply(
             }
         }
         Action::Play => {
+            ui.last_stop = None;
             let mut timeline = model.song.timeline();
             if timeline.packets.is_empty() || timeline.duration == 0 {
                 return Err("Add notes to an audible track before playing.".into());
@@ -1463,7 +1523,7 @@ fn apply(
         }
         Action::Record => {
             let port = ui.midi_input.value().checked_sub(1).and_then(|index| model.inputs.get(index as usize))
-                .ok_or("Choose a MIDI input at the bottom right. Use Playback → Refresh Devices if needed.")?;
+                .ok_or("Choose a MIDI input at the upper right. Use Playback → Refresh Devices if needed.")?;
             model.playback = None;
             model.captured.clear();
             model.recording = Some(recording::Recording::start(&port.port)?);
@@ -1481,9 +1541,21 @@ fn apply(
             }
         }
         Action::Stop => {
-            model.playhead = 0;
-            model.cue = 0;
-            model.view_beat = 0;
+            let now = std::time::Instant::now();
+            let rewind = ui
+                .last_stop
+                .take()
+                .is_some_and(|last| now.duration_since(last).as_millis() <= 400);
+            if rewind {
+                model.playback = None;
+                model.playhead = 0;
+                model.cue = 0;
+                model.view_beat = 0;
+                ui.clock.set_label("00:00.0");
+            } else {
+                halt_playback(model);
+                ui.last_stop = Some(now);
+            }
             if let Some(recording) = model.recording.take() {
                 let (duration, events, dropped) =
                     recording.finish(std::mem::take(&mut model.captured));
@@ -1506,9 +1578,11 @@ fn apply(
                 ui.clock.set_label("00:00.0");
                 return Ok(true);
             }
-            model.playback = None;
-            ui.clock.set_label("00:00.0");
-            ui.status.set_label("Stopped");
+            ui.status.set_label(if rewind {
+                "Returned to beginning"
+            } else {
+                "Stopped"
+            });
         }
         Action::Grid(point, delete) => {
             if let Some(note) = model.hit(point) {

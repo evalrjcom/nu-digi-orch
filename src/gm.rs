@@ -142,6 +142,35 @@ pub(super) fn instrument(track: &crate::song::Track) -> &'static str {
     }
 }
 
+pub(super) fn resolved<'a>(
+    track: &crate::song::Track,
+    font: Option<&'a rustysynth::SoundFont>,
+) -> &'a str {
+    if !track.has_midi() {
+        return instrument(track);
+    }
+    let Some(font) = font else {
+        return instrument(track);
+    };
+    let drums = track.channel == 9;
+    let bank = i32::from(track.setting(Some(0))) + if drums { 128 } else { 0 };
+    let patch = i32::from(track.setting(None));
+    let find = |bank, patch| {
+        font.get_presets()
+            .iter()
+            .rev()
+            .find(|p| p.get_bank_number() == bank && p.get_patch_number() == patch)
+    };
+    find(bank, patch)
+        .or_else(|| if drums { find(128, 0) } else { find(0, patch) })
+        .or_else(|| {
+            font.get_presets()
+                .iter()
+                .min_by_key(|p| (p.get_bank_number(), p.get_patch_number()))
+        })
+        .map_or_else(|| instrument(track), |p| p.get_name())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

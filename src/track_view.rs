@@ -172,7 +172,9 @@ pub(super) fn draw_tracks(frame: &Frame, model: &Model) {
         let color = colors[index % colors.len()];
         draw::draw_rect_fill(x, top, 3, LANE - 1, color);
         draw::set_draw_color(TEXT);
-        cells(x, top, values(index, track));
+        let mut labels = values(index, track);
+        labels[9] = gm::resolved(track, model.font.as_deref()).into();
+        cells(x, top, labels);
         for right in &OFFSETS[3..=7] {
             let cx = x + right - 6;
             draw::draw_polygon(cx - 3, top + 9, cx + 3, top + 9, cx, top + 5);

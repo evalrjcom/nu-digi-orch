@@ -1,6 +1,6 @@
 [package]
 name = "nu-digi-orch"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2021"
 description = "Lightweight MIDI composer and SoundFont player"
 

@@ -84,7 +84,7 @@ pub(super) fn paint(f: &Frame, m: &Model) {
             SUBTLE,
         );
         draw::set_font(Font::Helvetica, 11);
-        label(x, y + 43, w, 16, gm::instrument(t), TEXT);
+        label(x, y + 43, w, 16, gm::resolved(t, m.font.as_deref()), TEXT);
         draw::set_font(Font::Helvetica, 13);
         let pan = i32::from(t.setting(Some(10)));
         label(x, y + 60, w, 21, &format!("Pan {pan}"), TEXT);
