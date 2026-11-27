@@ -715,7 +715,14 @@ impl Song {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        Self::decode(&fs::read(path)?)
+        Ok(Self::import(path)?.0)
+    }
+
+    pub fn import(path: &Path) -> Result<(Self, bool)> {
+        let bytes = fs::read(path)?;
+        let riff = bytes.starts_with(b"RIFF");
+        let midi = if riff { riff_midi(&bytes)? } else { &bytes };
+        Ok((Self::decode(midi)?, riff))
     }
 
     fn decode(bytes: &[u8]) -> Result<Self> {
@@ -839,6 +846,16 @@ impl Song {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("orc") || ext.eq_ignore_ascii_case("rmi"))
+        {
+            return Err(invalid(
+                "Save this song as a .mid file to preserve the original container.",
+            )
+            .into());
+        }
         let bytes = self.encode()?;
         // A failed export must leave any existing project file intact.
         let parent = path
@@ -919,9 +936,73 @@ impl Song {
     }
 }
 
+fn riff_midi(bytes: &[u8]) -> io::Result<&[u8]> {
+    if bytes.get(8..12) != Some(b"RMID") {
+        return Err(invalid(
+            "Expected a RIFF RMID container with a MIDI sequence.",
+        ));
+    }
+    let size = |field: &[u8]| u32::from_le_bytes(field.try_into().unwrap()) as usize;
+    // Voyetra ORC files can append a separate WAVE form. Only inspect the RMID form.
+    let end = 8usize
+        .checked_add(size(&bytes[4..8]))
+        .ok_or_else(|| invalid("Invalid RMID size."))?;
+    let mut chunks = bytes
+        .get(12..end)
+        .ok_or_else(|| invalid("Truncated or invalid RMID container."))?;
+    while !chunks.is_empty() {
+        let header = chunks
+            .get(..8)
+            .ok_or_else(|| invalid("Truncated RMID chunk header."))?;
+        let len = size(&header[4..8]);
+        let body = &chunks[8..];
+        let data = body
+            .get(..len)
+            .ok_or_else(|| invalid("Truncated RMID chunk."))?;
+        if &header[..4] == b"data" && data.starts_with(b"MThd") {
+            return Ok(data);
+        }
+        chunks = len
+            .checked_add(len % 2)
+            .and_then(|padded| body.get(padded..))
+            .ok_or_else(|| invalid("Missing RMID chunk padding."))?;
+    }
+    Err(invalid("The RMID container has no MIDI data chunk."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_rmid_and_orc_midi_even_with_odd_chunks_and_appended_wave() {
+        let midi = Song::demo().encode().unwrap();
+        let mut chunks = b"RMIDJUNK\x01\0\0\0X\0data".to_vec();
+        chunks.extend((midi.len() as u32).to_le_bytes());
+        chunks.extend(&midi);
+        if !midi.len().is_multiple_of(2) {
+            chunks.push(0);
+        }
+        let mut riff = b"RIFF".to_vec();
+        riff.extend((chunks.len() as u32).to_le_bytes());
+        riff.extend(chunks);
+        assert_eq!(riff_midi(&riff).unwrap(), midi);
+        assert!(riff_midi(&riff[..riff.len() - 1]).is_err());
+        let mut oversized = riff.clone();
+        oversized[26..30].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(riff_midi(&oversized).is_err());
+        riff.extend(b"RIFF\x04\0\0\0WAVE");
+        let dir = tempfile::tempdir().unwrap();
+        for ext in ["rmi", "orc"] {
+            let path = dir.path().join(format!("source.{ext}"));
+            fs::write(&path, &riff).unwrap();
+            let (song, imported) = Song::import(&path).unwrap();
+            assert!(imported);
+            assert_eq!(song.encode().unwrap(), midi);
+            assert!(song.save(&path).is_err());
+            assert_eq!(fs::read(path).unwrap(), riff);
+        }
+    }
 
     #[test]
     fn transpose_moves_notes_and_keys_but_preserves_drums_and_rejects_overflow() {

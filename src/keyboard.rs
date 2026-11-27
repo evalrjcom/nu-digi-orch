@@ -15,6 +15,7 @@ const BLACK: [(usize, u8); 9] = [
 ];
 const KEYS: &str = "q1w2er3t4y5ui6o7p[8]9\\";
 
+#[derive(Default)]
 struct State {
     base: u8,
     held: [bool; 22],
@@ -27,14 +28,28 @@ struct State {
 }
 
 impl State {
+    fn active(&self, index: usize) -> bool {
+        self.held[index] || self.mouse == Some(index)
+    }
+
+    fn chord(&self) -> Option<harmony::Chord> {
+        let mut notes = (0..self.held.len())
+            .filter(|&index| self.active(index))
+            .map(|index| self.base + index as u8);
+        let bass = notes.next()? % 12;
+        // Count each pitch class once, even when it is held in multiple octaves.
+        let mask = notes.fold(1 << bass, |mask, note| mask | (1 << (note % 12)));
+        harmony::detect(mask, bass)
+    }
+
     fn change(&mut self, index: usize, down: bool, mouse: bool) {
-        let before = self.held[index] || self.mouse == Some(index);
+        let before = self.active(index);
         if mouse {
             self.mouse = down.then_some(index);
         } else {
             self.held[index] = down;
         }
-        let after = self.held[index] || self.mouse == Some(index);
+        let after = self.active(index);
         if before != after {
             let note = packet(
                 self.channel,
@@ -109,6 +124,7 @@ fn packet(channel: u8, code: u8, a: u8, b: u8, len: usize) -> song::Packet {
 pub(super) struct Keyboard {
     window: Window,
     keys: Frame,
+    chord: Frame,
     state: Rc<RefCell<State>>,
 }
 
@@ -119,28 +135,42 @@ impl Keyboard {
         flat_label(
             14,
             8,
-            690,
+            487,
             28,
             "Q–\\ play white keys · 1–9 play black keys    •    ← / → change octave",
             14,
             TEXT,
         );
+        let mut chord = Frame::new(504, 8, 108, 28, None);
+        chord.set_tooltip("Chord formed by held virtual piano notes");
         let mut keys = Frame::new(14, 44, 692, 159, None);
         let state = Rc::new(RefCell::new(State {
             base: 48,
-            held: [false; 22],
-            mouse: None,
-            channel: 0,
-            sender: None,
-            stream: None,
-            capture: None,
-            docked: false,
+            ..State::default()
         }));
+        let shared = state.clone();
+        chord.draw(move |frame| {
+            let name = shared
+                .borrow()
+                .chord()
+                .map_or_else(|| "—".into(), |chord| chord.label(false));
+            draw::draw_rect_fill(frame.x(), frame.y(), frame.w(), frame.h(), PANEL);
+            draw::set_font(Font::Helvetica, 14);
+            draw::set_draw_color(ACCENT);
+            draw::draw_text2(
+                &format!("Chord  {name}"),
+                frame.x(),
+                frame.y(),
+                frame.w(),
+                frame.h(),
+                Align::Center,
+            );
+        });
         let shared = state.clone();
         keys.draw(move |f| {
             let s = shared.borrow();
             let width = f.w() / WHITE.len() as i32;
-            let active = |note: u8| s.held[note as usize] || s.mouse == Some(note as usize);
+            let active = |note: u8| s.active(note as usize);
             draw::set_font(Font::Helvetica, 13);
             for (i, note) in WHITE.into_iter().enumerate() {
                 let x = f.x() + i as i32 * width;
@@ -182,6 +212,7 @@ impl Keyboard {
             }
         });
         let shared = state.clone();
+        let mut indicator = chord.clone();
         keys.handle(move |frame, event| {
             let mut s = shared.borrow_mut();
             match event {
@@ -223,10 +254,12 @@ impl Keyboard {
                 _ => return false,
             }
             frame.redraw();
+            indicator.redraw();
             true
         });
         let shared = state.clone();
         let mut display = keys.clone();
+        let mut indicator = chord.clone();
         window.handle(move |_, event| {
             let mut s = shared.borrow_mut();
             if event == Event::KeyDown && app::event_key() == Key::Escape && s.capture.is_some() {
@@ -236,6 +269,7 @@ impl Keyboard {
             let handled = s.handle_keys(event, true);
             if handled || event == Event::Unfocus {
                 display.redraw();
+                indicator.redraw();
             }
             handled
         });
@@ -261,6 +295,7 @@ impl Keyboard {
         Self {
             window,
             keys,
+            chord,
             state,
         }
     }
@@ -279,10 +314,13 @@ impl Keyboard {
         }
     }
 
-    pub fn capture(&self, capture: Option<crate::recording::Capture>) {
+    pub fn capture(&mut self, capture: Option<crate::recording::Capture>) {
         let mut state = self.state.borrow_mut();
         state.release();
         state.capture = capture;
+        drop(state);
+        self.keys.redraw();
+        self.chord.redraw();
     }
 
     pub fn open(
@@ -323,6 +361,28 @@ impl Keyboard {
         self.state.borrow_mut().docked = false;
         self.window.show();
         self.keys.redraw();
+        self.chord.redraw();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_chord_combines_mouse_and_keyboard_and_clears_on_release() {
+        let mut state = State {
+            base: 48,
+            ..State::default()
+        };
+        for index in [0, 4, 12] {
+            state.change(index, true, false);
+        }
+        assert!(state.chord().is_none());
+        state.change(7, true, true);
+        assert_eq!(state.chord().unwrap().label(false), "C");
+        state.release();
+        assert!(state.chord().is_none());
     }
 }

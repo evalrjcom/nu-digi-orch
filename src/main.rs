@@ -42,6 +42,8 @@ const SCROLL: i32 = 16;
 const ROWS: i32 = 24;
 const BEATS: u64 = 16;
 const BG: Color = Color::from_rgb(20, 25, 36);
+const RIFF_IMPORT_STATUS: &str =
+    "Imported MIDI arrangement only. Embedded audio and Voyetra project settings are excluded.";
 const PANEL: Color = Color::from_rgb(27, 34, 49);
 const TEXT: Color = Color::from_rgb(224, 232, 243);
 const SUBTLE: Color = Color::from_rgb(156, 174, 198);
@@ -120,6 +122,7 @@ struct Model {
     undo: Vec<Song>,
     redo: Vec<Song>,
     path: Option<PathBuf>,
+    imported_riff: bool,
     dirty: bool,
     font: Option<Arc<rustysynth::SoundFont>>,
     outputs: Vec<audio::Output>,
@@ -181,6 +184,7 @@ impl Model {
             undo: vec![],
             redo: vec![],
             path: None,
+            imported_riff: false,
             dirty: false,
             font: None,
             outputs: vec![],
@@ -239,6 +243,7 @@ impl Model {
         self.playhead = 0;
         self.song = song;
         self.path = path;
+        self.imported_riff = false;
         self.dirty = dirty;
         self.track = 0;
         self.selected = None;
@@ -250,6 +255,12 @@ impl Model {
         self.mixer_scroll = 0;
         self.high_key = 83;
         self.fit_pitch();
+    }
+    fn open(&mut self, path: PathBuf) -> song::Result<bool> {
+        let (song, riff) = Song::import(&path)?;
+        self.replace(song, Some(path), false);
+        self.imported_riff = riff;
+        Ok(riff)
     }
     fn fit_pitch(&mut self) {
         let notes = self.song.tracks[self.track].notes();
@@ -1772,23 +1783,41 @@ fn apply(
                         if let Some(path) = choose(
                             dialog::NativeFileChooserType::BrowseFile,
                             "Open MIDI",
-                            "MIDI\t*.{mid,midi}",
+                            "MIDI and Digital Orchestrator\t*.{mid,midi,rmi,orc}",
                         ) {
-                            model.replace(Song::open(&path)?, Some(path), false);
+                            let riff = model.open(path)?;
+                            ui.status.set_label(if riff {
+                                RIFF_IMPORT_STATUS
+                            } else {
+                                "MIDI opened."
+                            });
                         }
                     }
                 }
             }
         }
         Action::Save | Action::SaveAs => {
-            let path = if matches!(action, Action::Save) && model.path.is_some() {
-                model.path.clone()
-            } else {
-                browse_save("Save MIDI", "MIDI\t*.mid", "mid")
-            };
+            let path =
+                if matches!(action, Action::Save) && model.path.is_some() && !model.imported_riff {
+                    model.path.clone()
+                } else {
+                    browse_save("Save MIDI", "MIDI\t*.mid", "mid")
+                };
             if let Some(path) = path {
+                // Keep the original RIFF project available after saving the imported MIDI.
+                if model.imported_riff
+                    && model.path.as_ref().is_some_and(|original| {
+                        std::fs::canonicalize(original)
+                            .ok()
+                            .zip(std::fs::canonicalize(&path).ok())
+                            .is_some_and(|(original, target)| original == target)
+                    })
+                {
+                    return Err("Choose a different path to preserve the imported project.".into());
+                }
                 model.song.save(&path)?;
                 model.path = Some(path);
+                model.imported_riff = false;
                 model.dirty = false;
                 ui.status.set_label("MIDI saved.");
             }
@@ -2522,8 +2551,9 @@ fn main() {
     {
         let mut model = model.borrow_mut();
         if let Some(path) = arguments.first().map(PathBuf::from) {
-            match Song::open(&path) {
-                Ok(song) => model.replace(song, Some(path), false),
+            match model.open(path) {
+                Ok(true) => ui.status.set_label(RIFF_IMPORT_STATUS),
+                Ok(false) => {}
                 Err(error) => ui.status.set_label(&format!("Couldn't open MIDI: {error}")),
             }
         }

@@ -38,6 +38,10 @@ Choose **Track mixer** in the view selector. Each strip shows the track name, MI
 
 For longer songs, set **First beat** to move horizontally and **Top key** to change the pitch range.
 
+### Digital Orchestrator import
+
+**File → Open MIDI** accepts standard MIDI (`.mid`, `.midi`), RIFF MIDI (`.rmi`), and Voyetra Digital Orchestrator (`.orc`) files with an embedded RIFF MIDI sequence. ORC import brings in the MIDI arrangement, including note and patch events. Embedded audio and Voyetra-specific project settings are excluded. Save the imported arrangement as a separate `.mid` file.
+
 ## Sound Blaster and MIDI routing
 
 The **Output** list uses the operating system's MIDI API (WinMM, ALSA sequencer, or CoreMIDI). Ports whose names contain common Creative/Sound Blaster identifiers are labeled **Sound Blaster**. **Playback → Refresh Devices** rescans after connecting hardware. A card or driver must expose a MIDI port to appear in the list. If a card exposes audio output only, choose it under **Audio device** and select **Software SoundFont**. Devices whose audio driver name matches a Sound Blaster identifier are labeled there too.
@@ -83,7 +87,7 @@ Track and mixer views show the instrument associated with each track’s initial
 
 ## Virtual piano and track effects
 
-With an SF2 loaded, open **Playback → Virtual piano** or press **Ctrl+K**. The window auditions the channel, bank, and patch of the track selected when you open it. Click a piano key or hold its printed computer key. The white keys are `qwertyuiop[]\`. Number keys `1–9` play the black keys from left to right. The left and right arrows move the keyboard by an octave.
+With an SF2 loaded, open **Playback → Virtual piano** or press **Ctrl+K**. The window auditions the channel, bank, and patch of the track selected when you open it. Click a piano key or hold its printed computer key. The white keys are `qwertyuiop[]\`. Number keys `1–9` play the black keys from left to right. The left and right arrows move the keyboard by an octave. The chord indicator beside **Dock** shows the chord formed by the keys you hold, including notes held with the mouse.
 
 In **Track Mixer**, drag the Reverb, Chorus, or Delay slider on an individual track. These effects process that track’s SoundFont audio before the master effects and are included in GUI WAV exports. The amounts are session settings.
 

@@ -53,7 +53,7 @@ impl Chord {
     }
 }
 
-fn detect(mask: u16, bass: u8) -> Option<Chord> {
+pub(super) fn detect(mask: u16, bass: u8) -> Option<Chord> {
     for distance in 0..12 {
         let root = (bass + distance) % 12;
         let shifted = ((mask >> root) | (mask << (12 - root))) & 0xfff;
