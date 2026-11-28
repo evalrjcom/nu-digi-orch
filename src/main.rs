@@ -12,6 +12,7 @@ mod recording;
 mod rhythm;
 mod song;
 mod track_view;
+mod wizard;
 
 use fltk::{
     app::{self, MouseButton},
@@ -58,6 +59,7 @@ struct GridPoint {
 #[derive(Clone, Copy)]
 enum Action {
     New,
+    NewFromProgression,
     Demo,
     Open,
     Save,
@@ -424,6 +426,11 @@ impl Ui {
         menu.set_color(PANEL);
         for (path, key, action) in [
             ("File/New", Some('n'), Action::New),
+            (
+                "File/New from progression…",
+                None,
+                Action::NewFromProgression,
+            ),
             ("File/Open MIDI…", Some('o'), Action::Open),
             ("File/Save MIDI", Some('s'), Action::Save),
             ("File/Save MIDI As…", None, Action::SaveAs),
@@ -1827,6 +1834,16 @@ fn apply(
                 model.playback = None;
                 ui.win.hide();
                 return Ok(false);
+            }
+        }
+        Action::NewFromProgression => {
+            if discard_ok(model) {
+                if let Some(song) = wizard::show() {
+                    model.replace(song, None, true);
+                    ui.status.set_label(
+                        "Created editable drum, bass, pad, arpeggio, and rhythm tracks.",
+                    );
+                }
             }
         }
         Action::New | Action::Demo | Action::Open => {

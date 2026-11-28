@@ -45,6 +45,12 @@ To reuse a motif, select and copy notes with **Ctrl+C**, switch to the destinati
 
 In **Piano roll → Lane**, choose **Velocity**, **Expression (CC11)**, or **Sustain (CC64)**. Click to change one grid position or drag to draw across multiple positions. Velocity changes existing attacks, expression draws a level ramp, and the upper and lower halves of the sustain lane set pedal down and pedal up. Each stroke is undoable. Controller events are saved with MIDI. Software playback applies these controller lanes per instrument track. External devices receive standard MIDI channel messages.
 
+## New song from a progression
+
+Choose **File → New from progression**. Pick a preset or enter your own sequence in Roman numerals or chord names, including slash bass notes such as C/E. Roman numerals use major-scale degrees relative to the chosen tonic, with explicit accidentals for borrowed chords. Use spaces, commas or bars between chords. Each chord occupies one 4/4 bar.
+
+Choose a style and set BPM and repeats. The wizard creates editable MIDI tracks for drums, bass, pad, arpeggio, and rhythm keys. Style changes the groove, rhythm, and General MIDI patches. Save the result as MIDI.
+
 ## Track mixer
 
 Choose **Track mixer** in the view selector. Each strip shows the track name, MIDI channel and program. Drag the vertical volume fader or horizontal pan slider, and click Mute or Solo while playing. Scroll over the mixer to reach additional tracks. Volume and pan use standard MIDI values from 0 to 127, with pan centered at 64. SoundFont instrument tracks have independent volume, pan, bank, and program even when their MIDI channels match. External MIDI devices share these settings per channel.
