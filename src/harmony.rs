@@ -195,11 +195,12 @@ pub(super) fn draw_ruler(frame: &super::Frame, model: &super::Model, gutter: i32
         };
         let at = tick.max(start);
         let x = x_for(at);
-        let next = model.chords[index + 1..]
-            .iter()
-            .find(|(_, next)| next.is_some())
+        // End the label at a gap as well as at another chord, matching the edit tools.
+        let next = model
+            .chords
+            .get(index + 1)
             .map_or(end, |entry| entry.0.min(end));
-        let room = x_for(next) - x;
+        let room = x_for(next.max(start)) - x;
         if room < 10 {
             continue;
         }

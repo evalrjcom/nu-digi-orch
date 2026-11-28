@@ -135,6 +135,18 @@ impl Timeline {
                 }
             }
         }
+        // A note released exactly at the cue is already over. Re-triggering it here
+        // produces a stray attack even though its MIDI note-off follows immediately.
+        for packet in self
+            .packets
+            .iter()
+            .take_while(|packet| packet.micros == offset)
+        {
+            let [status, key, velocity] = packet.bytes;
+            if status & 0xf0 == 0x80 || (status & 0xf0 == 0x90 && velocity == 0) {
+                notes.remove(&(packet.track, usize::from(status & 15), key));
+            }
+        }
         for ((track, channel, key), velocity) in notes {
             events.push(Packet {
                 track,
@@ -370,6 +382,12 @@ impl Track {
                 setting_value(*message, cc).map(|value| (*tick, index, value))
             })
             .max()
+    }
+
+    fn has_note_on(&self) -> bool {
+        self.events.iter().any(|(_, event)| {
+            matches!(event, Event::Midi(_, MidiMessage::NoteOn { vel, .. }) if vel.as_int() > 0)
+        })
     }
 
     pub fn has_midi(&self) -> bool {
@@ -831,10 +849,7 @@ impl Song {
         // Format 1 files may put channel initialization on a separate setup track.
         let mut setup = Vec::new();
         for (track_index, track) in tracks.iter().enumerate() {
-            let has_notes = track.events.iter().any(|(_, event)| {
-                matches!(event, Event::Midi(_, MidiMessage::NoteOn { vel, .. }) if vel.as_int() > 0)
-            });
-            if has_notes {
+            if track.has_note_on() {
                 continue;
             }
             for (event_index, (tick, event)) in track.events.iter().enumerate() {
@@ -848,13 +863,14 @@ impl Song {
             }
         }
         setup.sort_unstable_by_key(|entry| entry.0);
-        for (track_index, track) in tracks.iter_mut().enumerate() {
-            let Some((tick, event_index)) = track.first_note() else {
+        for track in &mut tracks {
+            let Some((tick, _)) = track.first_note() else {
                 continue;
             };
             let mut settings = [None; 4];
             for &(position, channel, index, value) in &setup {
-                if position >= (tick, track_index, event_index) {
+                // A setup-only track can appear after the instrument track in a type-1 file.
+                if position.0 > tick {
                     break;
                 }
                 if channel == track.channel {
@@ -935,9 +951,15 @@ impl Song {
     pub fn timeline(&self) -> Timeline {
         let solo = self.tracks.iter().any(|track| track.solo);
         let mut events = Vec::new();
+        let mut instrument_tracks = Vec::new();
         let mut end = 0;
         for (index, track) in self.tracks.iter().enumerate() {
-            let audible = !track.mute && (!solo || track.solo);
+            let instrument = track.has_note_on();
+            if instrument {
+                instrument_tracks.push(index);
+            }
+            // Keep shared controller and patch setup available when soloing an instrument.
+            let audible = !track.mute && (!solo || track.solo || !instrument);
             if audible {
                 end = end.max(track.end);
             }
@@ -945,18 +967,25 @@ impl Song {
                 if matches!(event, Event::Meta(MetaMessage::Tempo(_)))
                     || (audible && matches!(event, Event::Midi(..)))
                 {
-                    events.push((*tick, index, event));
+                    let order = match event {
+                        Event::Meta(_) => 0,
+                        _ if !instrument => 1,
+                        _ => 2,
+                    };
+                    events.push((*tick, order, index, event));
                     end = end.max(*tick);
                 }
             }
         }
-        events.sort_by_key(|&(tick, _, _)| tick);
+        // Deliver setup before any same-tick instrument events while preserving track order
+        // within each group. In particular, program changes must precede the first attack.
+        events.sort_by_key(|&(tick, order, _, _)| (tick, order));
         let ppq = u128::from(self.ppq);
         let mut elapsed = 0_u128;
         let mut previous = 0;
         let mut tempo = 500_000;
         let mut packets = Vec::new();
-        for (tick, track, event) in events {
+        for (tick, _, track, event) in events {
             elapsed += u128::from(tick - previous) * u128::from(tempo);
             previous = tick;
             match event {
@@ -992,7 +1021,7 @@ impl Song {
         }
         elapsed += u128::from(end - previous) * u128::from(tempo);
         Timeline {
-            instrument_tracks:self.tracks.iter().enumerate().filter(|(_,t)|t.events.iter().any(|(_,event)|matches!(event,Event::Midi(_,MidiMessage::NoteOn{vel,..}) if vel.as_int()>0))).map(|(index,_)|index).collect(),
+            instrument_tracks,
             buses: self.tracks.iter().map(|t| t.bus.clone()).collect(),
             packets,
             duration: (elapsed / ppq).min(u128::from(u64::MAX)) as u64,
@@ -1213,6 +1242,36 @@ mod tests {
         assert_eq!(song.tracks[0].setting(None), 56);
         song.tracks[0].set_setting(None, 57);
         assert_eq!(song.tracks[0].setting(None), 57);
+    }
+
+    #[test]
+    fn later_setup_track_initializes_same_tick_note_during_solo() {
+        let mut song = Song::new();
+        song.tracks[0].add_note(0, 480, 60, 96);
+        song.add_track();
+        song.tracks[1].set_channel(0);
+        song.tracks[1].set_setting(None, 73);
+
+        let mut song = Song::decode(&song.encode().unwrap()).unwrap();
+        assert_eq!(song.tracks[0].setting(None), 73);
+        song.tracks[0].solo = true;
+        let timeline = song.timeline();
+        assert_eq!(timeline.packets[0].bytes, [0xc0, 73, 0]);
+        assert_eq!(timeline.packets[1].bytes, [0x90, 60, 96]);
+    }
+
+    #[test]
+    fn seek_does_not_retrigger_notes_released_at_the_cue() {
+        let mut song = Song::new();
+        song.tracks[0].add_note(0, 480, 60, 96);
+        song.tracks[0].add_note(480, 960, 60, 110);
+        let mut timeline = song.timeline();
+        timeline.seek(500_000);
+        let attacks = timeline
+            .packets
+            .iter()
+            .filter(|p| p.micros == 0 && p.bytes[0] == 0x90);
+        assert_eq!(attacks.map(|p| p.bytes[2]).collect::<Vec<_>>(), [110]);
     }
 
     #[test]

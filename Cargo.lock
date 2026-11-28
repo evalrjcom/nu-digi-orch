@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "nu-digi-orch"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "cpal",
  "fltk",
