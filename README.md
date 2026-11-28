@@ -79,7 +79,7 @@ Open **Playback → SoundFont effects** to adjust the master reverb, chorus and 
 
 ### Mix and master controls
 
-In **Track mixer**, drag the Bass or Treble line left or right to cut or boost up to 12 dB around 200 Hz or 4 kHz. The fixed **Master** strip controls the combined SoundFont output after effects, with unity at 100% and silence at 0%. The level bars show stereo RMS with 300 ms averaging on a −60 to 0 dBFS scale. Track meters follow track EQ; the master meter follows master gain. External MIDI output has no audio return to meter.
+In **Track mixer**, drag the Bass or Treble line left or right to cut or boost up to 12 dB around 200 Hz or 4 kHz. The fixed **Master** strip controls the combined SoundFont output after effects, with unity at 100% and silence at 0%. Each track and the master have a segmented stereo peak meter on a −60 to 0 dBFS scale. Green shows normal level, yellow starts above −12 dBFS, and the red **CLIP** light holds for one second after either channel exceeds full scale. Track meters read after track effects and EQ. The master meter reads after master effects, EQ, and gain, before samples are clamped for output. External MIDI output has no audio return to meter.
 
 The **Mixer** menu offers track starting points (Flat, Vocal presence, Bass weight, Acoustic sparkle) and master EQ/gain starting points (Flat unity, Warm tape EQ, Gentle smile EQ, Bright clarity). Select a track before applying a track preset. Tone and master settings apply during the session and are captured by GUI WAV export; Standard MIDI files retain their usual MIDI controls.
 

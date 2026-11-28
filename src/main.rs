@@ -2196,7 +2196,14 @@ fn apply(
                 } else {
                     None
                 };
-                audio::Playback::software(font, timeline, looping, device, model.effects.clone())?
+                audio::Playback::software(
+                    font,
+                    timeline,
+                    looping,
+                    device,
+                    model.effects.clone(),
+                    false,
+                )?
             });
             model.playhead = model.cue;
             ui.status.set_label("Playing");
@@ -2597,6 +2604,8 @@ fn main() {
             model.export_in_progress = false;
             ui.status.set_label(&message);
         }
+        let refresh_meters =
+            model.mixer && model.playback.as_ref().is_some_and(|p| p.is_software());
         if model.recording.is_some() {
             let model = &mut *model;
             if let Some(recording) = &model.recording {
@@ -2647,10 +2656,10 @@ fn main() {
                 ui.status.set_label("Playback finished.");
             }
             ui.advance_playhead(&mut model, micros);
-            // Audio levels continue changing after the transport reaches the final tick.
-            if model.mixer {
-                ui.arrangement.redraw();
-            }
+        }
+        // Keep the meters live during recording and during the synth's release tail.
+        if refresh_meters {
+            ui.arrangement.redraw();
         }
         ui.update_music_display(&model);
     }

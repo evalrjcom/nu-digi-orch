@@ -27,7 +27,7 @@ fn label(x: i32, y: i32, w: i32, h: i32, text: &str, color: Color) {
     );
 }
 
-fn eq_meter(x: i32, y: i32, bottom: i32, bus: &crate::bus::Bus, playing: bool) {
+fn draw_eq(x: i32, y: i32, bus: &crate::bus::Bus) {
     let [bass, treble, _, _] = bus.get();
     for (row, (name, v)) in [("Bass", bass), ("Treble", treble)].into_iter().enumerate() {
         let top = y + 105 + row as i32 * 28;
@@ -42,22 +42,47 @@ fn eq_meter(x: i32, y: i32, bottom: i32, bus: &crate::bus::Bus, playing: bool) {
         draw::draw_rect_fill(x + 12, top + 20, 92, 2, CONTROL);
         draw::draw_rect_fill(x + 10 + i32::from(v) * 92 / 24, top + 17, 5, 8, ACCENT);
     }
-    let top = y + 265;
-    let db = if playing {
-        20. * bus.rms().max(0.001).log10()
-    } else {
-        -60.
-    };
-    let level = ((db + 60.) / 60.).clamp(0., 1.);
-    draw::draw_rect_fill(x + 89, top, 9, bottom - top, CONTROL);
-    let pixels = ((bottom - top) as f32 * level) as i32;
-    draw::draw_rect_fill(
-        x + 89,
-        bottom - pixels,
-        9,
-        pixels,
-        if db >= 0. { Color::Red } else { ACCENT },
+}
+
+const SEGMENTS: i32 = 15;
+const AMBER_SEGMENTS: i32 = 3;
+const GREEN: Color = Color::from_rgb(70, 230, 151);
+const AMBER: Color = Color::from_rgb(255, 207, 86);
+const RED: Color = Color::from_rgb(252, 79, 93);
+const GREEN_OFF: Color = Color::from_rgb(26, 57, 53);
+const AMBER_OFF: Color = Color::from_rgb(67, 54, 34);
+const RED_OFF: Color = Color::from_rgb(63, 34, 46);
+
+fn lit_segments(peak: f32) -> i32 {
+    let db = 20. * peak.max(0.001).log10();
+    (((db + 60.) / 60.).clamp(0., 1.) * SEGMENTS as f32).ceil() as i32
+}
+
+fn led_meter(x: i32, top: i32, bottom: i32, meter: crate::bus::Meter) {
+    let x = x + 87;
+    draw::draw_rect_fill(x, top, 34, 15, if meter.clipping { RED } else { RED_OFF });
+    label(
+        x,
+        top,
+        34,
+        15,
+        "CLIP",
+        if meter.clipping { BG } else { SUBTLE },
     );
+    let first = top + 18;
+    let height = bottom - first;
+    let lit = lit_segments(meter.peak);
+    for segment in 0..SEGMENTS {
+        let color = match (segment < lit, segment >= SEGMENTS - AMBER_SEGMENTS) {
+            (true, false) => GREEN,
+            (true, true) => AMBER,
+            (false, false) => GREEN_OFF,
+            (false, true) => AMBER_OFF,
+        };
+        let start = bottom - (segment + 1) * height / SEGMENTS;
+        let end = bottom - segment * height / SEGMENTS;
+        draw::draw_rect_fill(x + 4, start, 26, (end - start - 2).max(1), color);
+    }
 }
 
 pub(super) fn paint(f: &Frame, m: &Model) {
@@ -66,6 +91,18 @@ pub(super) fn paint(f: &Frame, m: &Model) {
     draw::set_font(Font::Helvetica, 13);
     let (first, count) = page(f, m);
     let bottom = f.y() + f.h() - 60;
+    let playing = m.playback.as_ref().is_some_and(|p| {
+        p.is_software()
+            && !p.progress.paused.load(Ordering::Relaxed)
+            && !p.progress.done.load(Ordering::Relaxed)
+    });
+    let meter = |bus: &crate::bus::Bus| {
+        if playing {
+            bus.meter()
+        } else {
+            crate::bus::Meter::default()
+        }
+    };
     for (n, t) in m.song.tracks.iter().enumerate().skip(first).take(count) {
         let x = f.x() + ((n - first) as i32) * STRIP;
         let y = f.y();
@@ -98,13 +135,8 @@ pub(super) fn paint(f: &Frame, m: &Model) {
         draw::draw_rect_fill(x + 12, y + 87, 92, 3, CONTROL);
         draw::draw_rect_fill(x + 10 + pan * 92 / 127, y + 80, 5, 16, ACCENT);
         let volume = i32::from(t.setting(Some(7)));
-        eq_meter(
-            x,
-            y,
-            bottom,
-            &t.bus,
-            m.playback.as_ref().is_some_and(|p| p.is_software()),
-        );
+        draw_eq(x, y, &t.bus);
+        led_meter(x, y + 265, bottom, meter(&t.bus));
         for (row, (name, amount)) in ["Reverb", "Chorus", "Delay"]
             .into_iter()
             .zip(t.bus.effects())
@@ -150,13 +182,8 @@ pub(super) fn paint(f: &Frame, m: &Model) {
     draw::draw_rect_fill(x, y, STRIP - 4, f.h(), PANEL);
     label(x, y + 9, STRIP - 4, 26, "MASTER", ACCENT);
     label(x, y + 34, STRIP - 4, 20, "SoundFont", SUBTLE);
-    eq_meter(
-        x,
-        y,
-        bottom,
-        &m.effects.1,
-        m.playback.as_ref().is_some_and(|p| p.is_software()),
-    );
+    draw_eq(x, y, &m.effects.1);
+    led_meter(x, y + 265, bottom, meter(&m.effects.1));
     let gain = i32::from(m.effects.1.get()[2]);
     label(x, y + 239, STRIP - 4, 24, &format!("Gain {gain}%"), TEXT);
     let top = y + 265;
@@ -261,4 +288,17 @@ pub(super) fn handle(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peak_scale_separates_silence_green_and_amber() {
+        assert_eq!(lit_segments(0.), 0);
+        assert!(lit_segments(0.1) <= SEGMENTS - AMBER_SEGMENTS);
+        assert!(lit_segments(0.5) > SEGMENTS - AMBER_SEGMENTS);
+        assert_eq!(lit_segments(1.), SEGMENTS);
+    }
 }

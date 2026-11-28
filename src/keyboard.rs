@@ -339,7 +339,7 @@ impl Keyboard {
                 duration: 86_400_000_000,
             };
             // Keep audition voices separate from the song's transport and export.
-            let stream = audio::Playback::software(font, timeline, true, device, levels)?;
+            let stream = audio::Playback::software(font, timeline, true, device, levels, true)?;
             let sender = stream
                 .notes
                 .as_ref()

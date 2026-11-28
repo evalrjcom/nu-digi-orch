@@ -127,6 +127,7 @@ struct Stem {
 struct Renderer {
     rack: crate::effects::Rack,
     levels: Arc<crate::effects::Levels>,
+    meter_master: bool,
     stems: Vec<Stem>,
     master: crate::bus::Filter,
     timeline: Timeline,
@@ -184,6 +185,7 @@ impl Renderer {
         Ok(Self {
             rack: crate::effects::Rack::new(rate),
             levels,
+            meter_master: true,
             stems,
             master: crate::bus::Filter::new(rate),
             timeline,
@@ -291,7 +293,7 @@ impl Renderer {
                     if effects != [0; 3] {
                         stem.rack.process(&mut a[..n], &mut b[..n], effects);
                     }
-                    stem.filter.process(&mut a[..n], &mut b[..n], bus);
+                    bus.set_meter(stem.filter.process(&mut a[..n], &mut b[..n], bus));
                     for i in 0..n {
                         l[i] += a[i];
                         r[i] += b[i];
@@ -299,7 +301,10 @@ impl Renderer {
                 }
             }
             self.rack.process(out_left, out_right, self.levels.get());
-            self.master.process(out_left, out_right, &self.levels.1);
+            let meter = self.master.process(out_left, out_right, &self.levels.1);
+            if self.meter_master {
+                self.levels.1.set_meter(meter);
+            }
             self.frame += count as u64;
             left = rest_left;
             right = rest_right;
@@ -318,6 +323,7 @@ impl Playback {
         looping: bool,
         output: Option<&SoundDevice>,
         levels: Arc<crate::effects::Levels>,
+        audition: bool,
     ) -> Result<Self> {
         let default;
         let device = match output {
@@ -331,6 +337,14 @@ impl Playback {
         };
         let config = device.default_output_config()?;
         let mut renderer = Renderer::new(font, timeline, config.sample_rate().0, looping, levels)?;
+        // The separate virtual piano stream must not overwrite the transport meter.
+        renderer.meter_master = !audition;
+        if renderer.meter_master {
+            renderer.levels.1.set_meter(crate::bus::Meter::default());
+        }
+        for bus in &renderer.timeline.buses {
+            bus.set_meter(crate::bus::Meter::default());
+        }
         let progress = Arc::new(Progress::default());
         let channels = usize::from(config.channels());
         let (error_tx, errors) = std::sync::mpsc::channel();
@@ -609,12 +623,12 @@ mod mix_tests {
             left
         };
         let dry = render(&song);
-        assert!(song.tracks.iter().all(|track| track.bus.rms() > 0.));
-        assert!(levels.1.rms() > 0.);
+        assert!(song.tracks.iter().all(|track| track.bus.meter().peak > 0.));
+        assert!(levels.1.meter().peak > 0.);
         song.tracks[1].bus.set(10, -6, 100);
         let shaped = render(&song);
         assert!(dry.iter().zip(shaped).any(|(a, b)| (a - b).abs() > 0.001));
-        let piano_level = song.tracks[0].bus.rms();
+        let piano_level = song.tracks[0].bus.meter().peak;
         let before_fx = render(&song);
         song.tracks[1].bus.set_effect(2, 100);
         let after_fx = render(&song);
@@ -622,10 +636,10 @@ mod mix_tests {
             .iter()
             .zip(after_fx)
             .any(|(a, b)| (a - b).abs() > 0.001));
-        assert_eq!(song.tracks[0].bus.rms(), piano_level);
+        assert_eq!(song.tracks[0].bus.meter().peak, piano_level);
         song.tracks[1].set_setting(Some(7), 0);
         render(&song);
-        assert_eq!(song.tracks[0].bus.rms(), piano_level);
+        assert_eq!(song.tracks[0].bus.meter().peak, piano_level);
         levels.1.set(0, 0, 0);
         assert!(render(&song).iter().all(|&sample| sample == 0.));
     }
