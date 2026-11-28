@@ -12,10 +12,11 @@ pub enum Tool {
     Inversion,
     ArpUp,
     ArpDown,
+    Motif,
 }
 
 impl Tool {
-    pub const OPTIONS: [Self; 8] = [
+    pub const OPTIONS: [Self; 9] = [
         Self::Pencil,
         Self::Select,
         Self::Velocity,
@@ -24,7 +25,158 @@ impl Tool {
         Self::Inversion,
         Self::ArpUp,
         Self::ArpDown,
+        Self::Motif,
     ];
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lane {
+    #[default]
+    Hidden,
+    Velocity,
+    Expression,
+    Sustain,
+}
+
+impl Lane {
+    fn controller(self) -> Option<u8> {
+        match self {
+            Self::Expression => Some(11),
+            Self::Sustain => Some(64),
+            _ => None,
+        }
+    }
+}
+
+const LANE_HEIGHT: i32 = 64;
+
+pub fn note_height(frame: &Frame, model: &Model) -> i32 {
+    frame.h()
+        - RULER
+        - if model.edit_lane == Lane::Hidden {
+            0
+        } else {
+            LANE_HEIGHT
+        }
+}
+
+fn lane_point(frame: &Frame, model: &Model, x: i32, y: i32) -> (Tick, u8) {
+    let left = frame.x() + roll_gutter(model);
+    let width = frame.w() - roll_gutter(model);
+    let ppq = u64::from(model.song.ppq);
+    let tick = model.view_beat * ppq
+        + x.saturating_sub(left).clamp(0, width - 1) as u64 * (BEATS * ppq) / width as u64;
+    let value =
+        ((frame.y() + frame.h() - 1 - y).clamp(0, LANE_HEIGHT - 1) * 127 / (LANE_HEIGHT - 1)) as u8;
+    (tick / model.step * model.step, value)
+}
+
+fn draw_lane(frame: &Frame, model: &Model) {
+    if model.edit_lane == Lane::Hidden {
+        return;
+    }
+    let left = frame.x() + roll_gutter(model);
+    let bottom = frame.y() + frame.h();
+    let top = bottom - LANE_HEIGHT;
+    draw::draw_rect_fill(frame.x(), top, frame.w(), LANE_HEIGHT, BG);
+    draw::set_draw_color(SUBTLE);
+    let caption = match model.edit_lane {
+        Lane::Hidden => "",
+        Lane::Velocity => "Velocity",
+        Lane::Expression => "CC11 Expr.",
+        Lane::Sustain => "CC64 Pedal",
+    };
+    draw::draw_text2(
+        caption,
+        frame.x() + 3,
+        top + 3,
+        roll_gutter(model) - 4,
+        16,
+        Align::Inside | Align::Left | Align::Clip,
+    );
+    let ppq = u64::from(model.song.ppq);
+    let first = model.view_beat * ppq;
+    let last = first + BEATS * ppq;
+    let points: Vec<_> = if let Some(cc) = model.edit_lane.controller() {
+        model.song.tracks[model.track]
+            .controller_points(cc)
+            .filter(|p| (first..last).contains(&p.0))
+            .collect()
+    } else {
+        model
+            .notes
+            .iter()
+            .filter(|n| (first..last).contains(&n.start))
+            .map(|n| (n.start, n.velocity))
+            .collect()
+    };
+    draw::push_clip(left, top, frame.w() - roll_gutter(model), LANE_HEIGHT);
+    for (tick, value) in points {
+        let h = 1 + i32::from(value) * (LANE_HEIGHT - 2) / 127;
+        draw::draw_rect_fill(tick_x(frame, model, tick), bottom - h, 3, h, ACCENT);
+    }
+    draw::pop_clip();
+}
+
+pub fn paint_lane(
+    model: &mut Model,
+    lane: Lane,
+    mut from: (Tick, u8),
+    mut to: (Tick, u8),
+) -> song::Result<()> {
+    if from.0 > to.0 {
+        std::mem::swap(&mut from, &mut to);
+    }
+    let len = to.0 - from.0;
+    let value_at = |tick| {
+        let alpha = if len == 0 {
+            1.0
+        } else {
+            (tick - from.0) as f64 / len as f64
+        };
+        (f64::from(from.1) + f64::from(i16::from(to.1) - i16::from(from.1)) * alpha).round() as u8
+    };
+    if lane == Lane::Velocity {
+        let original: Vec<_> = model
+            .notes
+            .iter()
+            .copied()
+            .filter(|n| (from.0..=to.0).contains(&(n.start / model.step * model.step)))
+            .collect();
+        if !original.is_empty() {
+            let changed = original
+                .iter()
+                .map(|n| Note {
+                    velocity: value_at(n.start / model.step * model.step).max(1),
+                    ..*n
+                })
+                .collect();
+            update(model, original, changed)?;
+        }
+    } else if let Some(cc) = lane.controller() {
+        let points: Vec<_> = (from.0..=to.0)
+            .step_by(model.step as usize)
+            .map(|tick| {
+                let value = value_at(tick);
+                (
+                    tick,
+                    if cc == 64 {
+                        if value >= 64 {
+                            127
+                        } else {
+                            0
+                        }
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect();
+        model.checkpoint();
+        model.selected.clear();
+        model.song.tracks[model.track].paint_controller(cc, &points);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -50,7 +202,7 @@ impl Gesture {
     fn new(frame: &Frame, model: &Model, origin: GridPoint) -> Self {
         let chord_tool = matches!(
             model.roll_tool,
-            Tool::Tone | Tool::Chord | Tool::Inversion | Tool::ArpUp | Tool::ArpDown
+            Tool::Tone | Tool::Chord | Tool::Inversion | Tool::ArpUp | Tool::ArpDown | Tool::Motif
         );
         let target = (!chord_tool).then(|| model.hit(origin)).flatten();
         let mode = match target {
@@ -217,6 +369,8 @@ pub fn install(frame: &mut Frame, model: &Rc<RefCell<Model>>, tx: app::Sender<Ac
     frame.draw(move |f| {
         if let Ok(m) = data.try_borrow() {
             draw_grid(f, &m);
+            draw_lane(f, &m);
+            draw_preview(f, &m, &m.pattern);
             if let Some(drag) = *preview.borrow() {
                 if drag.gesture.track == m.track && drag.start != drag.end {
                     draw_drag(f, &m, drag);
@@ -226,6 +380,7 @@ pub fn install(frame: &mut Frame, model: &Rc<RefCell<Model>>, tx: app::Sender<Ac
         }
     });
     let data = Rc::clone(model);
+    let mut lane_start = None;
     frame.handle(move |f, event| {
         let Ok(m) = data.try_borrow() else {
             return false;
@@ -234,6 +389,33 @@ pub fn install(frame: &mut Frame, model: &Rc<RefCell<Model>>, tx: app::Sender<Ac
             return true;
         }
         let (x, y) = (app::event_x(), app::event_y());
+        if let Some((track, lane, point)) = lane_start {
+            match event {
+                Event::Released => {
+                    lane_start = None;
+                    tx.send(Action::PaintLane(
+                        track,
+                        lane,
+                        point,
+                        lane_point(f, &m, x, y),
+                    ));
+                    return true;
+                }
+                Event::Drag => return true,
+                Event::Unfocus => lane_start = None,
+                _ => {}
+            }
+        }
+        if event == Event::Push
+            && app::event_mouse_button() == MouseButton::Left
+            && m.edit_lane != Lane::Hidden
+            && y >= f.y() + f.h() - LANE_HEIGHT
+            && (f.x() + roll_gutter(&m)..f.x() + f.w()).contains(&x)
+        {
+            let _ = f.take_focus();
+            lane_start = Some((m.track, m.edit_lane, lane_point(f, &m, x, y)));
+            return true;
+        }
         match event {
             Event::Push => {
                 let Some(origin) = grid_point(f, &m, x, y) else {
@@ -284,6 +466,7 @@ pub fn install(frame: &mut Frame, model: &Rc<RefCell<Model>>, tx: app::Sender<Ac
             Event::Focus => {}
             Event::KeyDown if app::event_key() == Key::Escape => {
                 drag.borrow_mut().take();
+                tx.send(Action::CancelPattern);
                 f.redraw();
             }
             Event::KeyDown if app::event_key() == Key::Delete => tx.send(Action::DeleteNote),
@@ -307,7 +490,8 @@ fn drag_point(
         f,
         model,
         end.0.clamp(f.x() + roll_gutter(model), f.x() + f.w() - 1),
-        end.1.clamp(f.y() + RULER, f.y() + f.h() - 1),
+        end.1
+            .clamp(f.y() + RULER, f.y() + RULER + note_height(f, model) - 1),
     )
 }
 
@@ -333,7 +517,7 @@ fn draw_drag(f: &Frame, m: &Model, drag: Drag) {
                 drag_point(f, m, drag.gesture.origin, drag.end, false),
             ) {
                 let (_, changed) = drag.gesture.transformed(m, target, end, y - end_y);
-                let height = f.h() - RULER;
+                let height = note_height(f, m);
                 for note in changed {
                     let row = i32::from(m.high_key) - i32::from(note.key);
                     if !(0..ROWS).contains(&row) {
@@ -362,6 +546,22 @@ fn draw_drag(f: &Frame, m: &Model, drag: Drag) {
         Mode::Empty(_) => {}
     }
     draw::pop_clip();
+}
+
+fn draw_preview(f: &Frame, model: &Model, notes: &[Note]) {
+    draw::set_draw_color(Color::from_rgb(177, 151, 255));
+    let top = f.y() + RULER;
+    let height = note_height(f, model);
+    for note in notes {
+        let row = i32::from(model.high_key) - i32::from(note.key);
+        let start = tick_x(f, model, note.start);
+        let end = tick_x(f, model, note.end);
+        if (0..ROWS).contains(&row) && end > start {
+            let y = top + row * height / ROWS;
+            let h = top + (row + 1) * height / ROWS - y;
+            draw::draw_rect(start, y + 1, end - start, (h - 2).max(1));
+        }
+    }
 }
 
 pub fn gesture(
@@ -415,8 +615,12 @@ pub fn gesture(
         }
         Tool::Velocity => {}
         _ => {
-            let notes = chord_notes(model, tool, origin, length, velocity)?;
-            add(model, notes)?;
+            model.pattern.clear();
+            model.pattern = if tool == Tool::Motif {
+                motif_notes(model, origin.tick, end.tick)?
+            } else {
+                chord_notes(model, tool, origin, length, velocity)?
+            };
         }
     }
     Ok(())
@@ -457,7 +661,18 @@ fn chord_notes(
         .ok_or("Click under a detected chord in the piano roll.")?;
     let start = (point.tick / model.step * model.step).max(chord_start);
     let limit = model.chords.get(index).map_or(Tick::MAX, |&(tick, _)| tick);
-    let keys = chord.voicing(point.key, tool == Tool::Inversion);
+    let mut keys = chord.voicing(point.key, tool == Tool::Inversion);
+    if model.pattern_spread && keys.len() > 1 {
+        let last = keys.len() - 1;
+        if keys[last] <= 115 {
+            keys[last] += 12;
+        }
+    }
+    let interval = if model.pattern_triplet {
+        (u64::from(model.song.ppq) / 3).max(1)
+    } else {
+        model.step
+    };
     let mut notes = Vec::new();
     let finish = start.saturating_add(length).min(limit);
     match tool {
@@ -478,13 +693,13 @@ fn chord_notes(
                 keys.reverse();
             }
             for (i, key) in keys.into_iter().enumerate() {
-                let at = start.saturating_add(model.step.saturating_mul(i as Tick));
+                let at = start.saturating_add(interval.saturating_mul(i as Tick));
                 if at >= limit {
                     break;
                 }
                 notes.push(new_note(
                     at,
-                    at.saturating_add(length.min(model.step)).min(limit),
+                    at.saturating_add(length.min(interval)).min(limit),
                     key,
                     velocity,
                     channel,
@@ -494,6 +709,68 @@ fn chord_notes(
         _ => unreachable!("only chord tools generate harmony"),
     }
     Ok(notes)
+}
+
+fn motif_notes(model: &Model, from: Tick, to: Tick) -> song::Result<Vec<Note>> {
+    let notes = &model.note_clipboard;
+    let Some(first) = notes.iter().map(|n| n.start).min() else {
+        return Err("Select a motif and copy it with Ctrl+C first.".into());
+    };
+    let channel = model.song.tracks[model.track].channel;
+    if channel == 9 {
+        return Err("Choose a melodic track for the motif.".into());
+    }
+    let duration = notes
+        .iter()
+        .map(|n| n.end - first)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let start = from.min(to) / model.step * model.step;
+    let end = if from == to {
+        start.saturating_add(duration)
+    } else {
+        to.max(from).saturating_add(model.step - 1) / model.step * model.step
+    };
+    if (end - start)
+        .div_ceil(duration)
+        .saturating_mul(notes.len() as u64)
+        > 4096
+    {
+        return Err("Select a shorter motif range or copy fewer notes.".into());
+    }
+    let mut fitted = Vec::new();
+    for base in (start..end).step_by(duration as usize) {
+        for note in notes {
+            let tick = base.saturating_add(note.start - first);
+            if tick >= end {
+                continue;
+            }
+            let i = model.chords.partition_point(|&(at, _)| at <= tick);
+            let Some((_, Some(chord))) = i.checked_sub(1).and_then(|i| model.chords.get(i)) else {
+                continue;
+            };
+            let boundary = model.chords.get(i).map_or(end, |&(at, _)| at.min(end));
+            let finish = tick
+                .saturating_add((note.end - note.start).max(1))
+                .min(boundary);
+            let key = (0_u8..=127)
+                .filter(|&key| chord.contains(key))
+                .filter(|key| {
+                    fitted
+                        .iter()
+                        .all(|n: &Note| n.key != *key || n.end <= tick || n.start >= finish)
+                })
+                .min_by_key(|key| key.abs_diff(note.key));
+            if let Some(key) = key {
+                fitted.push(new_note(tick, finish, key, note.velocity, channel));
+            }
+        }
+    }
+    if fitted.is_empty() {
+        return Err("Select a range with detected harmony.".into());
+    }
+    Ok(fitted)
 }
 
 fn validate(existing: &[Note], originals: &[Note], new: &[Note]) -> song::Result<()> {
@@ -677,7 +954,7 @@ mod tests {
         for key in [60, 63, 67, 70] {
             track.add_note(0, 330, key, 96);
         }
-        model.chords = harmony::progression(&model.song);
+        model.cache_music();
         model.song.add_track();
         model.track = 1;
         let point = GridPoint { tick: 31, key: 72 };
@@ -712,5 +989,70 @@ mod tests {
             96
         )
         .is_err());
+    }
+    #[test]
+    fn motif_repeats_with_the_progression_and_cache_tracks_mute_and_undo() {
+        let mut model = Model::new();
+        let track = &mut model.song.tracks[0];
+        for (tick, keys) in [(0, [60, 64, 67]), (480, [62, 65, 69])] {
+            for key in keys {
+                track.add_note(tick, tick + 480, key, 96);
+            }
+        }
+        model.cache_music();
+        model.song.add_track();
+        model.track = 1;
+        model.note_clipboard = vec![new_note(200, 680, 64, 91, 0)];
+        let notes = motif_notes(&model, 0, 960).unwrap();
+        assert_eq!(
+            notes
+                .iter()
+                .map(|n| (n.start, n.end, n.key, n.velocity))
+                .collect::<Vec<_>>(),
+            [(0, 480, 64, 91), (480, 960, 65, 91)]
+        );
+        model.checkpoint();
+        model.song.tracks[0].mute = true;
+        model.cache_music();
+        assert!(model.chords.is_empty());
+        model.history(false);
+        model.cache_music();
+        assert_eq!(motif_notes(&model, 0, 960).unwrap(), notes);
+    }
+
+    #[test]
+    fn automation_stroke_replaces_existing_ticks_and_is_undoable() {
+        let mut model = note_model();
+        paint_lane(&mut model, Lane::Expression, (0, 0), (240, 100)).unwrap();
+        assert_eq!(
+            model.song.tracks[0]
+                .controller_points(11)
+                .collect::<Vec<_>>(),
+            [(0, 0), (120, 50), (240, 100)]
+        );
+        paint_lane(&mut model, Lane::Expression, (120, 3), (120, 80)).unwrap();
+        let points: Vec<_> = model.song.tracks[0].controller_points(11).collect();
+        assert_eq!(
+            points
+                .iter()
+                .filter(|p| p.0 == 120)
+                .copied()
+                .collect::<Vec<_>>(),
+            [(120, 80)]
+        );
+        model.history(false);
+        assert_eq!(
+            model.song.tracks[0]
+                .controller_points(11)
+                .collect::<Vec<_>>(),
+            [(0, 0), (120, 50), (240, 100)]
+        );
+        paint_lane(&mut model, Lane::Sustain, (0, 62), (120, 65)).unwrap();
+        assert_eq!(
+            model.song.tracks[0]
+                .controller_points(64)
+                .collect::<Vec<_>>(),
+            [(0, 0), (120, 127)]
+        );
     }
 }

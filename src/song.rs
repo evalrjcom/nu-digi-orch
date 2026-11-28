@@ -327,6 +327,45 @@ impl Track {
         }
     }
 
+    pub fn controller_points(&self, cc: u8) -> impl Iterator<Item = (Tick, u8)> + '_ {
+        self.events
+            .iter()
+            .filter_map(move |(tick, event)| match event {
+                Event::Midi(channel, MidiMessage::Controller { controller, value })
+                    if *channel == self.channel && controller.as_int() == cc =>
+                {
+                    Some((*tick, value.as_int()))
+                }
+                _ => None,
+            })
+    }
+
+    pub fn paint_controller(&mut self, cc: u8, points: &[(Tick, u8)]) {
+        let replacements: std::collections::HashSet<_> = points.iter().map(|p| p.0).collect();
+        self.events.retain(|(tick, event)| !matches!(
+            event, Event::Midi(channel, MidiMessage::Controller { controller, .. })
+            if *channel == self.channel && controller.as_int() == cc && replacements.contains(tick)
+        ));
+        // At a shared tick, apply the drawn automation before the note attack.
+        let mut painted: Vec<_> = points
+            .iter()
+            .map(|&(tick, value)| {
+                (
+                    tick,
+                    Event::Midi(
+                        self.channel,
+                        MidiMessage::Controller {
+                            controller: cc.into(),
+                            value: value.into(),
+                        },
+                    ),
+                )
+            })
+            .collect();
+        painted.append(&mut self.events);
+        self.events = painted;
+    }
+
     pub fn delete_notes(&mut self, notes: &[Note]) {
         let removed: std::collections::HashSet<_> =
             notes.iter().flat_map(|n| [n.on, n.off]).collect();
@@ -1242,6 +1281,38 @@ mod tests {
         assert_eq!(song.tracks[0].setting(None), 56);
         song.tracks[0].set_setting(None, 57);
         assert_eq!(song.tracks[0].setting(None), 57);
+    }
+
+    #[test]
+    fn format_one_fixture_keeps_program_and_overlapping_note_pairs() {
+        // Fixed SMF bytes exercise import independently of our own MIDI writer.
+        let fixture = b"MThd\0\0\0\x06\0\x01\0\x02\x01\xe0\
+            MTrk\0\0\0\x1c\
+            \0\x90\x3c\x60\x78\x90\x3c\x64\
+            \x78\x80\x3c\0\x78\x80\x3c\0\
+            \0\x90\x40\x55\x78\x80\x40\0\0\xff\x2f\0\
+            MTrk\0\0\0\x07\0\xc0\x49\0\xff\x2f\0";
+        let song = Song::decode(fixture).unwrap();
+        let notes = song.tracks[0].notes();
+        assert_eq!(song.tracks[0].setting(None), 73);
+        assert_eq!(
+            (notes[0].start, notes[0].end, notes[0].velocity),
+            (0, 240, 96)
+        );
+        assert_eq!(
+            (notes[1].start, notes[1].end, notes[1].velocity),
+            (120, 360, 100)
+        );
+
+        let mut timeline = song.timeline();
+        timeline.seek(400_000);
+        let at_cue: Vec<_> = timeline
+            .packets
+            .iter()
+            .filter(|p| p.micros == 0)
+            .map(|p| p.bytes)
+            .collect();
+        assert_eq!(at_cue, [[0xc0, 73, 0], [0x90, 64, 85]]);
     }
 
     #[test]

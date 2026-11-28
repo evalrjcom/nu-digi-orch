@@ -1,4 +1,4 @@
-use crate::song::{Song, Tick};
+use crate::song::{Note, Song, Tick};
 
 pub const MAJOR: [&str; 15] = [
     "Cb", "Gb", "Db", "Ab", "Eb", "Bb", "F", "C", "G", "D", "A", "E", "B", "F#", "C#",
@@ -76,12 +76,13 @@ impl Chord {
             .map_or(&[0], |(keys, _)| *keys)
     }
 
+    pub(crate) fn contains(self, key: u8) -> bool {
+        self.intervals().contains(&((key % 12 + 12 - self.0) % 12))
+    }
+
     pub(crate) fn closest_tone(self, target: u8) -> u8 {
         (0_u8..=127)
-            .filter(|key| {
-                self.intervals()
-                    .contains(&(((u16::from(*key) + 12 - u16::from(self.0)) % 12) as u8))
-            })
+            .filter(|&key| self.contains(key))
             .min_by_key(|key| key.abs_diff(target))
             .unwrap_or(target)
     }
@@ -120,15 +121,16 @@ pub(super) fn detect(mask: u16, bass: u8) -> Option<Chord> {
     None
 }
 
-pub fn progression(song: &Song) -> Vec<(Tick, Option<Chord>)> {
+pub fn progression(song: &Song, lanes: &[Vec<Note>]) -> Vec<(Tick, Option<Chord>)> {
     let solo = song.tracks.iter().any(|track| track.solo);
     let mut events = Vec::new();
-    for track in song.tracks.iter().filter(|t| !t.mute && (!solo || t.solo)) {
-        for note in track
-            .notes()
-            .into_iter()
-            .filter(|n| n.channel != 9 && n.end > n.start)
-        {
+    for (_, notes) in song
+        .tracks
+        .iter()
+        .zip(lanes)
+        .filter(|(t, _)| !t.mute && (!solo || t.solo))
+    {
+        for note in notes.iter().filter(|n| n.channel != 9 && n.end > n.start) {
             events.push((note.start, note.key, true));
             events.push((note.end, note.key, false));
         }

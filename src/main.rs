@@ -111,6 +111,12 @@ enum Action {
     DeleteNote,
     SnapNote,
     RollTool(piano::Tool),
+    PatternGrid(bool),
+    PatternSpread(bool),
+    CommitPattern,
+    CancelPattern,
+    ChooseLane(piano::Lane),
+    PaintLane(usize, piano::Lane, (Tick, u8), (Tick, u8)),
     RollGesture(piano::Gesture, GridPoint, i32),
     EraseNote(GridPoint),
     SelectNotes,
@@ -128,6 +134,13 @@ struct Model {
     selected: Vec<Note>,
     note_clipboard: Vec<Note>,
     roll_tool: piano::Tool,
+    pattern: Vec<Note>,
+    pattern_triplet: bool,
+    pattern_spread: bool,
+    edit_lane: piano::Lane,
+    edit_revision: u64,
+    cached_revision: Option<u64>,
+    cached_roll: Option<(u64, usize)>,
     undo: Vec<Song>,
     redo: Vec<Song>,
     path: Option<PathBuf>,
@@ -192,6 +205,13 @@ impl Model {
             selected: Vec::new(),
             note_clipboard: Vec::new(),
             roll_tool: piano::Tool::default(),
+            pattern: Vec::new(),
+            pattern_triplet: false,
+            pattern_spread: false,
+            edit_lane: piano::Lane::default(),
+            edit_revision: 0,
+            cached_revision: None,
+            cached_roll: None,
             undo: vec![],
             redo: vec![],
             path: None,
@@ -225,7 +245,21 @@ impl Model {
         self.playback = None;
         self.save_undo();
     }
+    fn invalidate_music(&mut self) {
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.pattern.clear();
+    }
+    fn cache_music(&mut self) {
+        if self.cached_revision != Some(self.edit_revision) {
+            self.lanes = self.song.tracks.iter().map(|track| track.notes()).collect();
+            self.chords = harmony::progression(&self.song, &self.lanes);
+            self.keys = self.song.key_map();
+            self.last_beat = self.song.end_tick().div_ceil(u64::from(self.song.ppq));
+            self.cached_revision = Some(self.edit_revision);
+        }
+    }
     fn save_undo(&mut self) {
+        self.invalidate_music();
         if self.undo.len() == 32 {
             self.undo.remove(0);
         }
@@ -244,6 +278,7 @@ impl Model {
             into.push(std::mem::replace(&mut self.song, song));
             self.track = self.track.min(self.song.tracks.len() - 1);
             self.selected.clear();
+            self.invalidate_music();
             self.dirty = true;
         }
     }
@@ -253,6 +288,7 @@ impl Model {
         self.jump_cue = None;
         self.playhead = 0;
         self.song = song;
+        self.invalidate_music();
         self.path = path;
         self.imported_riff = false;
         self.dirty = dirty;
@@ -274,7 +310,8 @@ impl Model {
         Ok(riff)
     }
     fn fit_pitch(&mut self) {
-        let notes = self.song.tracks[self.track].notes();
+        self.cache_music();
+        let notes = &self.lanes[self.track];
         if let (Some(lowest), Some(highest)) = (
             notes.iter().map(|note| note.key).min(),
             notes.iter().map(|note| note.key).max(),
@@ -358,6 +395,7 @@ struct Ui {
     grid: Frame,
     toggle_editor: Choice,
     piano_tools: Vec<fltk::widget::Widget>,
+    commit_pattern: Button,
     navigation_tools: Vec<fltk::widget::Widget>,
 
     status: Frame,
@@ -419,6 +457,48 @@ impl Ui {
             ("Edit/Copy Notes", Some('c'), Action::CopyNotes),
             ("Edit/Paste Notes at Cursor", Some('v'), Action::PasteNotes),
             ("Edit/Duplicate Notes", Some('d'), Action::DuplicateNotes),
+            (
+                "Piano roll/Lane/Hidden",
+                None,
+                Action::ChooseLane(piano::Lane::Hidden),
+            ),
+            (
+                "Piano roll/Lane/Velocity",
+                None,
+                Action::ChooseLane(piano::Lane::Velocity),
+            ),
+            (
+                "Piano roll/Lane/Expression (CC11)",
+                None,
+                Action::ChooseLane(piano::Lane::Expression),
+            ),
+            (
+                "Piano roll/Lane/Sustain (CC64)",
+                None,
+                Action::ChooseLane(piano::Lane::Sustain),
+            ),
+            (
+                "Piano roll/Pattern rhythm/Snap",
+                None,
+                Action::PatternGrid(false),
+            ),
+            (
+                "Piano roll/Pattern rhythm/Triplet",
+                None,
+                Action::PatternGrid(true),
+            ),
+            (
+                "Piano roll/Voicing/Close",
+                None,
+                Action::PatternSpread(false),
+            ),
+            (
+                "Piano roll/Voicing/Octave spread",
+                None,
+                Action::PatternSpread(true),
+            ),
+            ("Piano roll/Commit preview", None, Action::CommitPattern),
+            ("Piano roll/Discard preview", None, Action::CancelPattern),
             ("Edit/Delete Notes", None, Action::DeleteNote),
             ("Edit/Quantize Notes", None, Action::SnapNote),
             (
@@ -584,7 +664,7 @@ impl Ui {
         length.set_value(2);
         let mut roll_tool = Choice::new(1050, 84, 99, 28, None);
         roll_tool.add_choice(
-            "Pencil|Select|Velocity|Chord tone|Chord shape|1st inversion|Arp up|Arp down",
+            "Pencil|Select|Velocity|Chord tone|Chord shape|1st inversion|Arp up|Arp down|Fit motif",
         );
         roll_tool.set_value(0);
         roll_tool.set_tooltip("Piano roll tool. Use Shift to extend the selection.");
@@ -670,6 +750,7 @@ impl Ui {
             SUBTLE,
         );
 
+        let commit_pattern = button(600, 683, 129, "Commit pattern", tx, Action::CommitPattern);
         let piano_tools = vec![
             pitch_label.as_base_widget(),
             pitch.as_base_widget(),
@@ -820,6 +901,7 @@ impl Ui {
             toggle_editor,
             navigation_tools,
             piano_tools,
+            commit_pattern,
 
             status,
             clock,
@@ -885,20 +967,11 @@ impl Ui {
         self.beat.set_value(&(model.view_beat + 1).to_string());
         self.pitch.set_value(&model.high_key.to_string());
         model.step = division(model.song.ppq, self.snap.value());
-        if model.mixer {
-            model.lanes.clear();
-            model.notes.clear();
-        } else if model.track_view {
-            model.lanes = model
-                .song
-                .tracks
-                .iter()
-                .map(|track| track.notes())
-                .collect();
+        model.cache_music();
+        let roll = (model.edit_revision, model.track);
+        if model.cached_roll != Some(roll) {
             model.notes.clone_from(&model.lanes[model.track]);
-        } else {
-            model.notes = track.notes();
-            model.lanes.clear();
+            model.cached_roll = Some(roll);
         }
         let width = self.win.w() - 32 - if model.mixer { 0 } else { SCROLL };
         let height = self.win.h() - 228 - SCROLL;
@@ -944,7 +1017,6 @@ impl Ui {
                 bar.hide();
             }
         }
-        model.last_beat = model.song.end_tick().div_ceil(u64::from(model.song.ppq));
         self.sync_scrollbars(model);
         for tool in &mut self.piano_tools {
             if model.tracks_only {
@@ -981,8 +1053,11 @@ impl Ui {
                 .set_value(&(note.end - note.start).to_string());
             self.velocity.set_value(&note.velocity.to_string());
         }
-        model.chords = harmony::progression(&model.song);
-        model.keys = model.song.key_map();
+        if !model.tracks_only && !model.pattern.is_empty() {
+            self.commit_pattern.show();
+        } else {
+            self.commit_pattern.hide();
+        }
         self.update_music_display(model);
         self.grid.redraw();
         self.arrangement.redraw();
@@ -1222,7 +1297,7 @@ fn grid_point(grid: &Frame, model: &Model, x: i32, y: i32) -> Option<GridPoint> 
     let x = x - grid.x() - roll_gutter(model);
     let y = y - grid.y() - RULER;
     let width = grid.w() - roll_gutter(model);
-    let height = grid.h() - RULER;
+    let height = piano::note_height(grid, model);
     if !(0..width).contains(&x) || !(0..height).contains(&y) {
         return None;
     }
@@ -1236,7 +1311,7 @@ fn grid_point(grid: &Frame, model: &Model, x: i32, y: i32) -> Option<GridPoint> 
 fn draw_grid(grid: &Frame, model: &Model) {
     let (x, y, w, h) = (grid.x(), grid.y(), grid.w(), grid.h());
     let width = w - roll_gutter(model);
-    let height = h - RULER;
+    let height = piano::note_height(grid, model);
     draw::push_clip(x, y, w, h);
     draw::draw_rect_fill(x, y, w, h, PANEL);
     draw::set_font(Font::Helvetica, 12);
@@ -1735,6 +1810,7 @@ fn apply(
         Action::Lane(index, edit_notes) => {
             if index < model.song.tracks.len() {
                 model.track = index;
+                model.pattern.clear();
                 model.selected.clear();
                 model.fit_pitch();
                 if edit_notes {
@@ -2323,11 +2399,52 @@ fn apply(
                 "Stopped"
             });
         }
-        Action::RollTool(tool) => model.roll_tool = tool,
+        Action::RollTool(tool) => {
+            model.roll_tool = tool;
+            model.pattern.clear();
+        }
+        Action::PatternGrid(triplet) => {
+            model.pattern_triplet = triplet;
+            model.pattern.clear();
+            ui.status.set_label(if triplet {
+                "Pattern rhythm: triplet"
+            } else {
+                "Pattern rhythm: snap grid"
+            });
+        }
+        Action::PatternSpread(spread) => {
+            model.pattern_spread = spread;
+            model.pattern.clear();
+            ui.status.set_label(if spread {
+                "Voicing: octave spread"
+            } else {
+                "Voicing: close"
+            });
+        }
+        Action::ChooseLane(lane) => model.edit_lane = lane,
+        Action::CancelPattern => {
+            model.pattern.clear();
+            ui.status.set_label("Pattern preview discarded.");
+        }
+        Action::CommitPattern if !model.tracks_only => {
+            if !model.pattern.is_empty() {
+                let notes = model.pattern.clone();
+                piano::add(model, notes)?;
+                ui.status.set_label("Pattern added.");
+            }
+        }
+        Action::PaintLane(track, lane, from, to) if !model.tracks_only && track == model.track => {
+            piano::paint_lane(model, lane, from, to)?;
+        }
+        Action::CommitPattern | Action::PaintLane(..) => {}
         Action::RollGesture(gesture, end, velocity_delta) => {
             let length = division(model.song.ppq, ui.length.value());
             let velocity = number_value(&ui.velocity, 1, 127).unwrap_or(96) as u8;
             piano::gesture(model, gesture, end, velocity_delta, length, velocity)?;
+            if !model.pattern.is_empty() {
+                ui.status
+                    .set_label("Pattern preview · Commit pattern to add it.");
+            }
         }
         Action::EraseNote(point) => {
             if let Some(note) = model.hit(point) {

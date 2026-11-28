@@ -205,8 +205,8 @@ impl Renderer {
         let target = stems.binary_search_by_key(&p.track, |stem| stem.track).ok();
         // Notes and mixer parameters on an instrument track belong to its stem.
         // Controller-only tracks still provide shared channel settings for imported MIDI.
-        let local =
-            matches!(kind, 0x80 | 0x90 | 0xc0) || (kind == 0xb0 && matches!(a, 0 | 7 | 10 | 32));
+        let local = matches!(kind, 0x80 | 0x90 | 0xc0)
+            || (kind == 0xb0 && matches!(a, 0 | 7 | 10 | 11 | 32 | 64));
         if let Some(index) = target.filter(|_| local) {
             stems[index]
                 .synth

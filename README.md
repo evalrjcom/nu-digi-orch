@@ -37,7 +37,13 @@ Use the tool selector beside **New length** in Split View or Full Piano Roll.
 
 ### Compose from detected chords
 
-Select a melodic track for the new notes and click below a detected chord in the ruler. Click pitch sets the register. **Chord tone** picks the nearest pitch in the detected chord, **Chord shape** adds the full voicing, and **1st inversion** puts the next chord tone in the bass. **Arp up** and **Arp down** play through the voicing at the current Snap interval. Generated notes follow New Length and stop at the next chord boundary. An empty melodic track gives you room to layer a new part over the source harmony.
+Select a melodic track for the new notes and click below a detected chord. **Chord tone**, **Chord shape**, **1st inversion**, **Arp up**, and **Arp down** outline the generated notes in the piano roll. Set the rhythm or octave spread in the **Piano roll** menu, then click again to generate a new preview. Click **Commit pattern** to add the MIDI notes, or press **Esc** to discard them. Generated notes stop at the next chord boundary.
+
+To reuse a motif, select and copy notes with **Ctrl+C**, switch to the destination track, then choose **Fit motif**. Click to fit it once or drag across a range to repeat it. The preview preserves the motif’s rhythm and velocity, fits each attack to the detected chord, and leaves gaps where no chord is detected.
+
+### Draw velocity and MIDI automation
+
+In **Piano roll → Lane**, choose **Velocity**, **Expression (CC11)**, or **Sustain (CC64)**. Click to change one grid position or drag to draw across multiple positions. Velocity changes existing attacks, expression draws a level ramp, and the upper and lower halves of the sustain lane set pedal down and pedal up. Each stroke is undoable. Controller events are saved with MIDI. Software playback applies these controller lanes per instrument track. External devices receive standard MIDI channel messages.
 
 ## Track mixer
 
