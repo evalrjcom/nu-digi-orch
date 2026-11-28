@@ -22,6 +22,23 @@ During playback and recording, the amber vertical line marks the current musical
 | Ctrl+K | Open the virtual piano. |
 | Ctrl+Z / Ctrl+Y | Undo or redo. |
 
+## Piano roll editing
+
+Use the tool selector beside **New length** in Split View or Full Piano Roll.
+
+| Tool or control | What it does |
+| --- | --- |
+| **Pencil** | Click to add a note at the snap grid. Drag across empty space to draw a longer note. |
+| **Select** | Click a note or drag a box from empty space. Shift-click toggles individual notes, and Shift-drag adds to the selection. |
+| **Move / resize** | With Pencil or Select, drag the body of a note to move it in time and pitch. Drag either edge to change its duration. Drag a selected note to edit the whole selection. |
+| **Velocity** | Drag up or down on a note to change its velocity. Hold Shift and click to select multiple notes, then drag to change their velocities together. |
+| **Apply / Quantize** | Enter exact values in the note inspector and click Apply, or snap the selected starts with Quantize. When multiple notes are selected, Apply uses the first selected note as the reference and applies the same changes to the group. |
+| **Edit menu** | Select All, Cut, Copy, Paste at Cursor, and Duplicate work with groups. Click the ruler to set the paste cursor. Delete removes the selection and right-click erases one note. Undo restores the entire edit. |
+
+### Compose from detected chords
+
+Select a melodic track for the new notes and click below a detected chord in the ruler. Click pitch sets the register. **Chord tone** picks the nearest pitch in the detected chord, **Chord shape** adds the full voicing, and **1st inversion** puts the next chord tone in the bass. **Arp up** and **Arp down** play through the voicing at the current Snap interval. Generated notes follow New Length and stop at the next chord boundary. An empty melodic track gives you room to layer a new part over the source harmony.
+
 ## Track mixer
 
 Choose **Track mixer** in the view selector. Each strip shows the track name, MIDI channel and program. Drag the vertical volume fader or horizontal pan slider, and click Mute or Solo while playing. Scroll over the mixer to reach additional tracks. Volume and pan use standard MIDI values from 0 to 127, with pan centered at 64. SoundFont instrument tracks have independent volume, pan, bank, and program even when their MIDI channels match. External MIDI devices share these settings per channel.
@@ -31,7 +48,7 @@ Choose **Track mixer** in the view selector. Each strip shows the track name, MI
 1. Open a MIDI file with **File → Open MIDI**, or open the built-in two-track song with **File → Open Demo**.
 2. Choose **Load SF2** and select a SoundFont 2 file. The software synth plays through the system default or a device selected in **Audio device**. On Linux the app also checks common system SoundFont locations. Set `NU_DIGI_ORCH_SF2` to load a specific file at startup.
 3. Press **Play** or activate **Loop** before playback. To send MIDI to hardware or another application, select its port in **Output**.
-4. Double-click a track lane to open its piano roll. Click the piano roll to add or select a note. Drag a note to move it in pitch and time. Right-click or press Delete with the roll focused to remove a note. The note fields below the roll set exact tick position, pitch, duration, and velocity. **Snap** controls the edit grid, and **New length** controls the duration of newly drawn notes.
+4. Double-click a track lane to open its piano roll. Use Pencil to draw notes and Select for group edits.
 5. Add tracks with **+**. Select a MIDI channel and program and set bank, volume, and pan in the track table. Channel 10 is percussion in General MIDI. Click a **Prog** value or **SoundFont presets…** to browse banks, patches, and names in the loaded SoundFont. Select a preset, then click **Apply to track**. External devices share patch and controller settings per MIDI channel. Mute and Solo control playback and WAV export for the current session.
 6. Pick a port in **MIDI input…** in the upper-right corner, beside the audio device selector, then press **Record MIDI**. The app captures a take from the start of the timeline. Play or monitor the instrument on your MIDI device during capture. **Stop** adds the take as a new editable track.
 7. Save a standard MIDI file, or use **File → Export WAV** to mix the audible tracks to a stereo 44.1 kHz, 16-bit WAV with the loaded SoundFont.

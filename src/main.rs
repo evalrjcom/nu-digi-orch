@@ -7,6 +7,7 @@ mod gm;
 mod harmony;
 mod keyboard;
 mod mixer;
+mod piano;
 mod recording;
 mod rhythm;
 mod song;
@@ -109,8 +110,14 @@ enum Action {
     ApplyNote,
     DeleteNote,
     SnapNote,
-    Grid(GridPoint, bool),
-    MoveNote(GridPoint, GridPoint),
+    RollTool(piano::Tool),
+    RollGesture(piano::Gesture, GridPoint, i32),
+    EraseNote(GridPoint),
+    SelectNotes,
+    CutNotes,
+    CopyNotes,
+    PasteNotes,
+    DuplicateNotes,
 }
 
 struct Model {
@@ -118,7 +125,9 @@ struct Model {
     song: Song,
     track: usize,
     notes: Vec<Note>,
-    selected: Option<Note>,
+    selected: Vec<Note>,
+    note_clipboard: Vec<Note>,
+    roll_tool: piano::Tool,
     undo: Vec<Song>,
     redo: Vec<Song>,
     path: Option<PathBuf>,
@@ -180,7 +189,9 @@ impl Model {
             song,
             track: 0,
             notes: vec![],
-            selected: None,
+            selected: Vec::new(),
+            note_clipboard: Vec::new(),
+            roll_tool: piano::Tool::default(),
             undo: vec![],
             redo: vec![],
             path: None,
@@ -232,7 +243,7 @@ impl Model {
             self.playback = None;
             into.push(std::mem::replace(&mut self.song, song));
             self.track = self.track.min(self.song.tracks.len() - 1);
-            self.selected = None;
+            self.selected.clear();
             self.dirty = true;
         }
     }
@@ -246,7 +257,7 @@ impl Model {
         self.imported_riff = false;
         self.dirty = dirty;
         self.track = 0;
-        self.selected = None;
+        self.selected.clear();
         self.undo.clear();
         self.redo.clear();
         self.view_beat = 0;
@@ -403,8 +414,13 @@ impl Ui {
                 None,
                 Action::CountSound(rhythm::Pattern::SideStick),
             ),
-            ("Edit/Delete Note", None, Action::DeleteNote),
-            ("Edit/Quantize Selected Note", None, Action::SnapNote),
+            ("Edit/Select All Notes", Some('a'), Action::SelectNotes),
+            ("Edit/Cut Notes", Some('x'), Action::CutNotes),
+            ("Edit/Copy Notes", Some('c'), Action::CopyNotes),
+            ("Edit/Paste Notes at Cursor", Some('v'), Action::PasteNotes),
+            ("Edit/Duplicate Notes", Some('d'), Action::DuplicateNotes),
+            ("Edit/Delete Notes", None, Action::DeleteNote),
+            ("Edit/Quantize Notes", None, Action::SnapNote),
             (
                 "Track/Record into selected track",
                 Some('r'),
@@ -566,6 +582,17 @@ impl Ui {
         let mut length = Choice::new(951, 84, 93, 28, None);
         length.add_choice("Quarter|Eighth|16th|32nd");
         length.set_value(2);
+        let mut roll_tool = Choice::new(1050, 84, 99, 28, None);
+        roll_tool.add_choice(
+            "Pencil|Select|Velocity|Chord tone|Chord shape|1st inversion|Arp up|Arp down",
+        );
+        roll_tool.set_value(0);
+        roll_tool.set_tooltip("Piano roll tool. Use Shift to extend the selection.");
+        roll_tool.set_callback(move |tool| {
+            if let Some(&mode) = piano::Tool::OPTIONS.get(tool.value() as usize) {
+                tx.send(Action::RollTool(mode));
+            }
+        });
 
         let mut arrangement = Frame::new(16, 120, WIDTH - 32, 230, None);
         let data = Rc::clone(model);
@@ -592,67 +619,7 @@ impl Ui {
         });
         let mut grid = Frame::new(16, 350, WIDTH - 32, 272, None);
         grid.set_frame(FrameType::FlatBox);
-        let data = Rc::clone(model);
-        grid.draw(move |f| {
-            if let Ok(m) = data.try_borrow() {
-                draw_grid(f, &m);
-                track_view::draw_playhead(f, &m, roll_gutter(&m));
-            }
-        });
-        let handle_model = Rc::clone(model);
-        let mut drag = None;
-        grid.handle(move |frame, event| {
-            if let Ok(m) = handle_model.try_borrow() {
-                if track_view::seek_ruler(frame, &m, event, roll_gutter(&m), tx) {
-                    return true;
-                }
-            }
-            let point = || {
-                let model = handle_model.try_borrow().ok()?;
-                grid_point(frame, &model, app::event_x(), app::event_y())
-            };
-            match event {
-                Event::Push => {
-                    let Some(point) = point() else { return false };
-                    let _ = frame.take_focus();
-                    if app::event_mouse_button() == MouseButton::Right {
-                        tx.send(Action::Grid(point, true));
-                    } else if app::event_mouse_button() == MouseButton::Left {
-                        drag = Some(point);
-                    }
-                    true
-                }
-                Event::Drag => drag.is_some(),
-                Event::Released => {
-                    if let Some(start) = drag.take() {
-                        if let Some(end) = point() {
-                            if start.key == end.key
-                                && start.tick.abs_diff(end.tick)
-                                    < handle_model.try_borrow().map_or(1, |model| model.step)
-                            {
-                                tx.send(Action::Grid(start, false));
-                            } else {
-                                tx.send(Action::MoveNote(start, end));
-                            }
-                        }
-                    }
-                    true
-                }
-                Event::MouseWheel => {
-                    if let Ok(model) = handle_model.try_borrow() {
-                        let key = i32::from(model.high_key) - app::event_dy_value();
-                        tx.send(Action::ScrollPitch(key.clamp(ROWS - 1, 127) as u8));
-                    }
-                    true
-                }
-                Event::Focus | Event::Unfocus => true,
-                Event::KeyDown if app::event_key() == Key::Delete => {
-                    tx.send(Action::DeleteNote);
-                    true
-                }
-                _ => false,
-            }
-        });
+        piano::install(&mut grid, model, tx);
         let start_label = flat_label(249, 634, 76, 24, "Start tick", 13, SUBTLE);
         let start = number(323, 633, 75, 0);
         let key_label = flat_label(412, 634, 28, 24, "Key", 13, SUBTLE);
@@ -710,6 +677,7 @@ impl Ui {
             snap.as_base_widget(),
             length_label.as_base_widget(),
             length.as_base_widget(),
+            roll_tool.as_base_widget(),
             start_label.as_base_widget(),
             start.as_base_widget(),
             key_label.as_base_widget(),
@@ -1001,7 +969,12 @@ impl Ui {
         } else {
             2
         });
-        if let Some(note) = model.selected {
+        // Event indices can change after a track edit or import. Drop stale selections.
+        if !model.selected.is_empty() && !model.tracks_only {
+            let notes: std::collections::HashSet<_> = model.notes.iter().copied().collect();
+            model.selected.retain(|note| notes.contains(note));
+        }
+        if let Some(note) = model.selected.first() {
             self.start.set_value(&note.start.to_string());
             self.key.set_value(&note.key.to_string());
             self.duration
@@ -1342,6 +1315,8 @@ fn draw_grid(grid: &Frame, model: &Model) {
             Align::Inside | Align::Left,
         );
     }
+    let selected: std::collections::HashSet<_> =
+        model.selected.iter().map(|note| note.on).collect();
     for note in &model.notes {
         if note.key > model.high_key || model.high_key - note.key >= ROWS as u8 {
             continue;
@@ -1360,7 +1335,7 @@ fn draw_grid(grid: &Frame, model: &Model) {
         let row = i32::from(model.high_key - note.key);
         let top = y + RULER + row * height / ROWS;
         let bottom = y + RULER + (row + 1) * height / ROWS;
-        let color = if model.selected.as_ref() == Some(note) {
+        let color = if selected.contains(&note.on) {
             Color::from_rgb(255, 204, 111)
         } else {
             ACCENT
@@ -1372,6 +1347,10 @@ fn draw_grid(grid: &Frame, model: &Model) {
             (bottom - top - 4).max(1),
             color,
         );
+        let fill = (right - left - 2).max(1) * i32::from(note.velocity) / 127;
+        if bottom - top >= 8 && fill > 0 {
+            draw::draw_rect_fill(left + 1, bottom - 4, fill, 2, BG);
+        }
     }
     harmony::draw_ruler(grid, model, roll_gutter(model));
     draw::pop_clip();
@@ -1637,7 +1616,7 @@ fn apply(
                 revised.transpose(shift)?;
                 model.checkpoint();
                 model.song = revised;
-                model.selected = None;
+                model.selected.clear();
                 model.fit_pitch();
             }
         }
@@ -1750,13 +1729,13 @@ fn apply(
             } else if model.track_view {
                 "Select a track or double-click a lane to edit its notes."
             } else {
-                "Click to add or select a note • Drag to move • Right-click to delete"
+                "Choose a piano roll tool. Drag note edges to resize. Right-click to erase."
             });
         }
         Action::Lane(index, edit_notes) => {
             if index < model.song.tracks.len() {
                 model.track = index;
-                model.selected = None;
+                model.selected.clear();
                 model.fit_pitch();
                 if edit_notes {
                     model.track_view = false;
@@ -1863,13 +1842,13 @@ fn apply(
             model.track = model.song.tracks.len() - 1;
             model.track_scroll = model.track;
             model.mixer_scroll = model.track;
-            model.selected = None;
+            model.selected.clear();
         }
         Action::RemoveTrack => {
             model.checkpoint();
             model.song.remove_track(model.track);
             model.track = model.track.min(model.song.tracks.len() - 1);
-            model.selected = None;
+            model.selected.clear();
         }
         Action::FocusCell(index, col) => {
             model.column = col;
@@ -1920,7 +1899,7 @@ fn apply(
             };
             model.save_undo();
             model.track = index;
-            model.selected = None;
+            model.selected.clear();
             let track = &mut model.song.tracks[index];
             match col {
                 1 => track.rename(input.trim()),
@@ -2003,7 +1982,7 @@ fn apply(
                 let track = &mut model.song.tracks[model.track];
                 track.set_setting(Some(0), (bank % 128) as u8);
                 track.set_setting(None, program as u8);
-                model.selected = None;
+                model.selected.clear();
                 live_edit(
                     model,
                     vec![
@@ -2036,7 +2015,7 @@ fn apply(
             model.save_undo();
             model.song.set_tempo(bpm);
             live_edit(model, Vec::new(), true);
-            model.selected = None;
+            model.selected.clear();
         }
         Action::ScrollTime(beat) => {
             model.follow_playhead = false;
@@ -2325,7 +2304,7 @@ fn apply(
                         model.record_target.take(),
                     );
                     model.fit_pitch();
-                    model.selected = None;
+                    model.selected.clear();
                     model.view_beat = 0;
                     if dropped == 0 {
                         ui.status.set_label("MIDI take added.");
@@ -2344,63 +2323,54 @@ fn apply(
                 "Stopped"
             });
         }
-        Action::Grid(point, delete) => {
+        Action::RollTool(tool) => model.roll_tool = tool,
+        Action::RollGesture(gesture, end, velocity_delta) => {
+            let length = division(model.song.ppq, ui.length.value());
+            let velocity = number_value(&ui.velocity, 1, 127).unwrap_or(96) as u8;
+            piano::gesture(model, gesture, end, velocity_delta, length, velocity)?;
+        }
+        Action::EraseNote(point) => {
             if let Some(note) = model.hit(point) {
-                if delete {
-                    model.checkpoint();
-                    model.song.tracks[model.track].delete_note(note);
-                    model.selected = None;
-                } else {
-                    model.selected = Some(note);
-                }
-            } else if !delete {
-                let start = point.tick / model.step * model.step;
-                let end = start + division(model.song.ppq, ui.length.value());
-                if let Some(note) = model.notes.iter().find(|note| {
-                    note.key == point.key
-                        && note.channel == model.song.tracks[model.track].channel
-                        && note.start < end
-                        && note.end > start
-                }) {
-                    model.selected = Some(*note);
-                } else {
-                    let velocity = number_value(&ui.velocity, 1, 127).unwrap_or(96) as u8;
-                    model.checkpoint();
-                    model.selected = Some(
-                        model.song.tracks[model.track].add_note(start, end, point.key, velocity),
-                    );
+                piano::remove(model, &[note]);
+            }
+        }
+        Action::SelectNotes if !model.tracks_only => model.selected.clone_from(&model.notes),
+        Action::CopyNotes | Action::CutNotes if !model.tracks_only => {
+            if !model.selected.is_empty() {
+                model.note_clipboard.clone_from(&model.selected);
+                if matches!(action, Action::CutNotes) {
+                    piano::remove(model, &model.selected.clone());
                 }
             }
         }
-        Action::MoveNote(from, to) => {
-            if let Some(note) = model.hit(from) {
-                let start = note
-                    .start
-                    .saturating_add_signed(to.tick as i64 - from.tick as i64);
-                let start = (start + model.step / 2) / model.step * model.step;
-                let key = (i16::from(note.key) + i16::from(to.key) - i16::from(from.key))
-                    .clamp(0, 127) as u8;
-                update_note(
-                    model,
-                    note,
-                    Note {
-                        start,
-                        end: start + (note.end - note.start).max(1),
-                        key,
-                        ..note
-                    },
-                )?;
-            }
+        Action::PasteNotes | Action::DuplicateNotes if !model.tracks_only => {
+            let (notes, tick) = if matches!(action, Action::DuplicateNotes) {
+                let notes = model.selected.clone();
+                let tick = notes.iter().map(|note| note.end).max().unwrap_or(0);
+                (notes, tick.div_ceil(model.step).saturating_mul(model.step))
+            } else {
+                (
+                    model.note_clipboard.clone(),
+                    piano::snap(model.cue, model.step),
+                )
+            };
+            piano::paste(model, &notes, tick)?;
         }
-        Action::ApplyNote | Action::SnapNote => {
-            let note = model.selected.ok_or("Select a note first.")?;
+        Action::ApplyNote | Action::SnapNote if !model.tracks_only => {
+            let originals = model.selected.clone();
+            let anchor = *originals.first().ok_or("Select notes first.")?;
             let changed = if matches!(action, Action::SnapNote) {
-                let start = (note.start + model.step / 2) / model.step * model.step;
-                Note {
-                    start,
-                    end: start + (note.end - note.start).max(1),
-                    ..note
-                }
+                originals
+                    .iter()
+                    .map(|&note| {
+                        let start = piano::snap(note.start, model.step);
+                        Note {
+                            start,
+                            end: start.saturating_add((note.end - note.start).max(1)),
+                            ..note
+                        }
+                    })
+                    .collect()
             } else {
                 let start = number_value(&ui.start, 0, i64::MAX as u64)
                     .ok_or("Enter a valid start tick.")?;
@@ -2411,43 +2381,51 @@ fn apply(
                 let velocity = number_value(&ui.velocity, 1, 127)
                     .ok_or("Velocity must be between 1 and 127.")?
                     as u8;
-                Note {
-                    start,
-                    end: start + duration,
-                    key,
-                    velocity,
-                    ..note
-                }
+                let timing_delta = i128::from(start) - i128::from(anchor.start);
+                let length_delta = i128::from(duration) - i128::from(anchor.end - anchor.start);
+                let key_delta = i16::from(key) - i16::from(anchor.key);
+                let velocity_delta = i16::from(velocity) - i16::from(anchor.velocity);
+                originals
+                    .iter()
+                    .map(|&note| {
+                        let start = Tick::try_from(i128::from(note.start) + timing_delta).map_err(
+                            |_| "This edit would move notes before the start of the song.",
+                        )?;
+                        let end =
+                            Tick::try_from(i128::from(note.end) + timing_delta + length_delta)
+                                .map_err(|_| {
+                                    "This edit would make a note too long or too short."
+                                })?;
+                        let key = i16::from(note.key) + key_delta;
+                        if !(0..=127).contains(&key) {
+                            return Err("This edit would move a note outside the MIDI key range.");
+                        }
+                        Ok(Note {
+                            start,
+                            end,
+                            key: key as u8,
+                            velocity: (i16::from(note.velocity) + velocity_delta).clamp(1, 127)
+                                as u8,
+                            ..note
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?
             };
-            update_note(model, note, changed)?;
+            piano::update(model, originals, changed)?;
         }
-        Action::DeleteNote => {
-            if let Some(note) = model.selected.take() {
-                model.checkpoint();
-                model.song.tracks[model.track].delete_note(note);
-            }
+        Action::DeleteNote if !model.tracks_only => {
+            piano::remove(model, &model.selected.clone());
         }
+        Action::SelectNotes
+        | Action::CopyNotes
+        | Action::CutNotes
+        | Action::PasteNotes
+        | Action::DuplicateNotes
+        | Action::ApplyNote
+        | Action::SnapNote
+        | Action::DeleteNote => {}
     }
     Ok(true)
-}
-
-fn update_note(model: &mut Model, original: Note, changed: Note) -> song::Result<()> {
-    if original == changed {
-        return Ok(());
-    }
-    if model.notes.iter().any(|note| {
-        note.on != original.on
-            && note.channel == changed.channel
-            && note.key == changed.key
-            && note.start < changed.end
-            && note.end > changed.start
-    }) {
-        return Err("This edit would overlap a note of the same pitch and MIDI channel.".into());
-    }
-    model.checkpoint();
-    model.song.tracks[model.track].change_note(changed);
-    model.selected = Some(changed);
-    Ok(())
 }
 
 struct SpaceShortcut {

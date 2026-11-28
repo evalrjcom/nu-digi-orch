@@ -75,7 +75,7 @@ pub struct Song {
     pub tracks: Vec<Track>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Note {
     pub on: usize,
     pub off: usize,
@@ -285,9 +285,45 @@ impl Track {
         );
     }
 
-    pub fn delete_note(&mut self, note: Note) {
-        self.events.remove(note.on.max(note.off));
-        self.events.remove(note.on.min(note.off));
+    pub fn order_retriggers(&mut self, edited: &mut [Note]) {
+        // Moving or pasting can put a new attack before the previous release at
+        // the same tick. A MIDI note-off at that point would cut the new attack.
+        let notes = self.notes();
+        let releases: HashMap<_, _> = notes
+            .iter()
+            .filter(|n| n.start < n.end)
+            .map(|n| ((n.end, n.channel, n.key), n.off))
+            .collect();
+        let edited_events: std::collections::HashSet<_> =
+            edited.iter().flat_map(|note| [note.on, note.off]).collect();
+        let mut moved = HashMap::new();
+        for note in notes {
+            if let Some(&off) = releases.get(&(note.start, note.channel, note.key)) {
+                if note.on < off
+                    && !moved.contains_key(&off)
+                    && (edited_events.contains(&off) || edited_events.contains(&note.on))
+                {
+                    self.events.swap(note.on, off);
+                    moved.insert(note.on, off);
+                    moved.insert(off, note.on);
+                }
+            }
+        }
+        for note in edited {
+            note.on = moved.get(&note.on).copied().unwrap_or(note.on);
+            note.off = moved.get(&note.off).copied().unwrap_or(note.off);
+        }
+    }
+
+    pub fn delete_notes(&mut self, notes: &[Note]) {
+        let removed: std::collections::HashSet<_> =
+            notes.iter().flat_map(|n| [n.on, n.off]).collect();
+        let mut index = 0;
+        self.events.retain(|_| {
+            let keep = !removed.contains(&index);
+            index += 1;
+            keep
+        });
     }
 
     pub fn set_channel(&mut self, channel: u8) {
@@ -1259,7 +1295,7 @@ mod tests {
         };
         track.change_note(changed);
         assert_eq!(track.notes(), [changed]);
-        track.delete_note(changed);
+        track.delete_notes(&[changed]);
         assert!(track.notes().is_empty());
     }
 }

@@ -53,23 +53,65 @@ impl Chord {
     }
 }
 
+// Detection and the piano roll's chord tools share the same interval definitions.
+const QUALITIES: [(&[u8], &str); 11] = [
+    (&[0, 4, 7, 11], "maj7"),
+    (&[0, 4, 7, 10], "7"),
+    (&[0, 3, 7, 10], "m7"),
+    (&[0, 3, 6, 10], "m7b5"),
+    (&[0, 3, 6, 9], "dim7"),
+    (&[0, 4, 7], ""),
+    (&[0, 3, 7], "m"),
+    (&[0, 3, 6], "dim"),
+    (&[0, 4, 8], "aug"),
+    (&[0, 2, 7], "sus2"),
+    (&[0, 5, 7], "sus4"),
+];
+
+impl Chord {
+    fn intervals(self) -> &'static [u8] {
+        QUALITIES
+            .iter()
+            .find(|(_, name)| *name == self.1)
+            .map_or(&[0], |(keys, _)| *keys)
+    }
+
+    pub(crate) fn closest_tone(self, target: u8) -> u8 {
+        (0_u8..=127)
+            .filter(|key| {
+                self.intervals()
+                    .contains(&(((u16::from(*key) + 12 - u16::from(self.0)) % 12) as u8))
+            })
+            .min_by_key(|key| key.abs_diff(target))
+            .unwrap_or(target)
+    }
+
+    pub(crate) fn voicing(self, target: u8, inverted: bool) -> Vec<u8> {
+        let intervals = self.intervals();
+        let mut offsets = intervals.to_vec();
+        let mut bass = self.0;
+        if inverted && offsets.len() > 1 {
+            let first = offsets[1];
+            offsets.rotate_left(1);
+            for offset in &mut offsets {
+                *offset = (*offset + 12 - first) % 12;
+            }
+            bass = (bass + first) % 12;
+        }
+        let span = offsets.iter().copied().max().unwrap_or(0);
+        let base = (bass..=127 - span)
+            .step_by(12)
+            .min_by_key(|key| key.abs_diff(target))
+            .unwrap_or(bass);
+        offsets.into_iter().map(|offset| base + offset).collect()
+    }
+}
+
 pub(super) fn detect(mask: u16, bass: u8) -> Option<Chord> {
     for distance in 0..12 {
         let root = (bass + distance) % 12;
         let shifted = ((mask >> root) | (mask << (12 - root))) & 0xfff;
-        for (intervals, name) in [
-            (&[0, 4, 7, 11][..], "maj7"),
-            (&[0, 4, 7, 10], "7"),
-            (&[0, 3, 7, 10], "m7"),
-            (&[0, 3, 6, 10], "m7b5"),
-            (&[0, 3, 6, 9], "dim7"),
-            (&[0, 4, 7], ""),
-            (&[0, 3, 7], "m"),
-            (&[0, 3, 6], "dim"),
-            (&[0, 4, 8], "aug"),
-            (&[0, 2, 7], "sus2"),
-            (&[0, 5, 7], "sus4"),
-        ] {
+        for (intervals, name) in QUALITIES {
             if intervals.iter().fold(0, |bits, &n| bits | (1 << n)) == shifted {
                 return Some(Chord(root, name));
             }
