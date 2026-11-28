@@ -722,7 +722,35 @@ impl Song {
         let bytes = fs::read(path)?;
         let riff = bytes.starts_with(b"RIFF");
         let midi = if riff { riff_midi(&bytes)? } else { &bytes };
-        Ok((Self::decode(midi)?, riff))
+        let mut song = Self::decode(midi)?;
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("orc"))
+        {
+            for track in &mut song.tracks {
+                // Voyetra records the zero-based GM patch as a private track setting.
+                // Convert it to a local Program Change so playback, edits and saves use it.
+                if track.first_note().is_none() || track.setting_event(None).is_some() {
+                    continue;
+                }
+                let program = track
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|(tick, event)| match event {
+                        Event::Text(0x7f, bytes) if *tick == 0 => match bytes.as_slice() {
+                            [0x03, 0x00, 0x07, value @ 0..=127] => Some(*value),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(program) = program {
+                    track.set_setting(None, program);
+                }
+            }
+        }
+        Ok((song, riff))
     }
 
     fn decode(bytes: &[u8]) -> Result<Self> {
@@ -973,6 +1001,73 @@ fn riff_midi(bytes: &[u8]) -> io::Result<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orc_track_patches_become_editable_gm_program_changes() {
+        let mut song = Song::new();
+        let metadata = |patch| (0, Event::Text(0x7f, vec![3, 0, 7, patch]));
+        for (index, (channel, patch)) in [(4, 73), (4, 40), (5, 127), (3, 255), (9, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            if index > 0 {
+                song.add_track();
+            }
+            let track = &mut song.tracks[index];
+            track.events.clear();
+            track.channel = channel;
+            track.events.push(metadata(patch));
+            track.add_note(480, 480, 60, 100);
+        }
+        // An explicit startup program takes precedence over the ORC patch.
+        song.tracks[2].set_setting(None, 56);
+        // An in-song change remains later than the restored startup patch.
+        song.tracks[0].events.push((
+            960,
+            Event::Midi(4, MidiMessage::ProgramChange { program: 74.into() }),
+        ));
+        let midi = song.encode().unwrap();
+        let mut riff = b"RIFF".to_vec();
+        riff.extend((12 + midi.len().next_multiple_of(2) as u32).to_le_bytes());
+        riff.extend(b"RMIDdata");
+        riff.extend((midi.len() as u32).to_le_bytes());
+        riff.extend(midi);
+        riff.resize(riff.len().next_multiple_of(2), 0);
+        let dir = tempfile::tempdir().unwrap();
+        let orc = dir.path().join("instruments.ORC");
+        fs::write(&orc, &riff).unwrap();
+        let loaded = Song::open(&orc).unwrap();
+        assert_eq!(crate::gm::instrument(&loaded.tracks[0]), "Flute");
+        assert_eq!(crate::gm::instrument(&loaded.tracks[1]), "Violin");
+        assert_eq!(crate::gm::instrument(&loaded.tracks[4]), "Drum Kit");
+        let programs = |song: &Song| {
+            song.tracks
+                .iter()
+                .map(|t| t.setting(None))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(programs(&loaded), [73, 40, 56, 0, 0]);
+        assert_eq!(
+            programs(&Song::decode(&loaded.encode().unwrap()).unwrap()),
+            programs(&loaded)
+        );
+        let timeline = loaded.timeline();
+        let first_note = timeline
+            .packets
+            .iter()
+            .position(|p| p.track == 0 && p.bytes[0] == 0x94)
+            .unwrap();
+        assert_eq!(timeline.packets[first_note - 1].bytes, [0xc4, 73, 0]);
+        assert!(timeline
+            .packets
+            .iter()
+            .skip(first_note)
+            .any(|p| p.track == 0 && p.bytes == [0xc4, 74, 0]));
+
+        let rmi = dir.path().join("instruments.rmi");
+        fs::write(&rmi, riff).unwrap();
+        assert_eq!(programs(&Song::open(&rmi).unwrap()), [0, 0, 56, 0, 0]);
+    }
 
     #[test]
     fn imports_rmid_and_orc_midi_even_with_odd_chunks_and_appended_wave() {

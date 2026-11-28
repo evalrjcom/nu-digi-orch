@@ -40,7 +40,7 @@ For longer songs, set **First beat** to move horizontally and **Top key** to cha
 
 ### Digital Orchestrator import
 
-**File → Open MIDI** accepts standard MIDI (`.mid`, `.midi`), RIFF MIDI (`.rmi`), and Voyetra Digital Orchestrator (`.orc`) files with an embedded RIFF MIDI sequence. ORC import brings in the MIDI arrangement, including note and patch events. Embedded audio and Voyetra-specific project settings are excluded. Save the imported arrangement as a separate `.mid` file.
+**File → Open MIDI** accepts standard MIDI (`.mid`, `.midi`), RIFF MIDI (`.rmi`), and Voyetra Digital Orchestrator (`.orc`) files with an embedded RIFF MIDI sequence. ORC import brings in the MIDI arrangement, including note and patch events. Embedded audio and Voyetra-specific project settings are excluded. Save the imported arrangement as a separate `.mid` file. Voyetra track patch metadata is restored as standard GM program changes when the track has no explicit startup program.
 
 ## Sound Blaster and MIDI routing
 
